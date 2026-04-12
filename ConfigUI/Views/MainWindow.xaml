@@ -1,0 +1,105 @@
+<Window x:Class="ConfigUI.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:md="http://materialdesigninxaml.net/winfx/xaml/themes"
+        xmlns:vm="clr-namespace:ConfigUI.ViewModels"
+        Title="GoalKeeper" Height="720" Width="1100"
+        MinHeight="600" MinWidth="900"
+        WindowStyle="SingleBorderWindow"
+        Background="{DynamicResource MaterialDesign.Brush.Background}"
+        TextElement.Foreground="{DynamicResource MaterialDesign.Brush.Foreground}"
+        TextElement.FontFamily="{md:MaterialDesignFont}"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="Auto">
+
+    <Window.DataContext>
+        <vm:MainViewModel />
+    </Window.DataContext>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="56"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- ── Top bar ─────────────────────────────────────────────────────── -->
+        <Border Grid.Row="0" Background="{DynamicResource MaterialDesign.Brush.Primary}"
+                Padding="16,0">
+            <Grid>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <md:PackIcon Kind="ShieldLock" Width="28" Height="28"
+                                 Foreground="White" Margin="0,0,12,0"/>
+                    <TextBlock Text="GoalKeeper" FontSize="20" FontWeight="Bold"
+                               Foreground="White" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"
+                            VerticalAlignment="Center">
+                    <!-- Armed status indicator -->
+                    <Border CornerRadius="4" Padding="8,4" Margin="0,0,8,0"
+                            Background="{Binding ArmedBadgeColor}">
+                        <StackPanel Orientation="Horizontal">
+                            <md:PackIcon Kind="{Binding ArmedIcon}" Width="16" Height="16"
+                                         Foreground="White" Margin="0,0,4,0"/>
+                            <TextBlock Text="{Binding ArmedLabel}" Foreground="White"
+                                       FontSize="12" FontWeight="Medium" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Nuclear mode badge -->
+                    <Border CornerRadius="4" Padding="8,4" Margin="0,0,8,0"
+                            Background="#CC2222"
+                            Visibility="{Binding NuclearBadgeVisibility}">
+                        <StackPanel Orientation="Horizontal">
+                            <md:PackIcon Kind="Radioactive" Width="16" Height="16"
+                                         Foreground="White" Margin="0,0,4,0"/>
+                            <TextBlock Text="{Binding NuclearCountdown}" Foreground="White"
+                                       FontSize="12" FontWeight="Bold" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Service connection dot -->
+                    <Ellipse Width="10" Height="10" VerticalAlignment="Center"
+                             Fill="{Binding ConnectionColor}" ToolTip="{Binding ConnectionLabel}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ── Main content with side nav ─────────────────────────────────── -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="200"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Side navigation -->
+            <Border Grid.Column="0"
+                    Background="{DynamicResource MaterialDesign.Brush.Card.Background}"
+                    BorderBrush="{DynamicResource MaterialDesign.Brush.Divider}"
+                    BorderThickness="0,0,1,0">
+                <StackPanel Margin="0,8">
+                    <ListBox ItemsSource="{Binding NavItems}"
+                             SelectedItem="{Binding SelectedNavItem}"
+                             BorderThickness="0"
+                             Background="Transparent">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal" Margin="16,10">
+                                    <md:PackIcon Kind="{Binding Icon}" Width="20" Height="20"
+                                                 Margin="0,0,12,0"/>
+                                    <TextBlock Text="{Binding Label}" FontSize="14"
+                                               VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </StackPanel>
+            </Border>
+
+            <!-- Page content area -->
+            <ContentControl Grid.Column="1"
+                            Content="{Binding CurrentPage}"
+                            Margin="0"/>
+        </Grid>
+    </Grid>
+</Window>

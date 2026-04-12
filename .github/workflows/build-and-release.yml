@@ -1,0 +1,97 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore NuGet packages
+        run: dotnet restore GoalKeeper.sln
+
+      - name: Build ServiceEngine
+        run: |
+          dotnet publish ServiceEngine/ServiceEngine.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -o ServiceEngine/bin/Release/net8.0-windows/win-x64/publish
+
+      - name: Build ConfigUI
+        run: |
+          dotnet publish ConfigUI/ConfigUI.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -o ConfigUI/bin/Release/net8.0-windows/win-x64/publish
+
+      - name: Download Python Embeddable Runtime
+        run: |
+          $pythonUrl = "https://www.python.org/ftp/python/3.13.0/python-3.13.0-embed-amd64.zip"
+          Invoke-WebRequest -Uri $pythonUrl -OutFile "python-embed.zip"
+          Expand-Archive -Path "python-embed.zip" -DestinationPath "Installer/python-embed"
+          # Also download pip for the embedded runtime
+          Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile "Installer/python-embed/get-pip.py"
+          .\Installer\python-embed\python.exe Installer\python-embed\get-pip.py --no-warn-script-location
+        shell: powershell
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Compile Installer
+        run: iscc Installer\setup.iss
+        shell: cmd
+
+      - name: Upload installer artifact (PR builds)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoalKeeperSetup
+          path: Installer/Output/GoalKeeperSetup.exe
+          retention-days: 7
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Installer/Output/GoalKeeperSetup.exe
+          name: "GoalKeeper ${{ github.ref_name }}"
+          body: |
+            ## GoalKeeper ${{ github.ref_name }}
+
+            ### Installation
+            1. Download `GoalKeeperSetup.exe`
+            2. Run as Administrator
+            3. Follow the Setup Wizard
+            4. GoalKeeper starts in **Audit Mode** (safe – you can still kill it via Task Manager)
+            5. After testing your settings, optionally "Arm" the system for full tamper-proofing
+
+            ### Safe Mode Recovery
+            If you accidentally lock yourself out in Armed Nuclear Mode:
+            1. Hold Shift and click Restart in the Start Menu
+            2. Choose: Troubleshoot → Advanced Options → Startup Settings → Restart
+            3. Press 4 for Safe Mode
+            4. Open Add/Remove Programs and uninstall GoalKeeper normally
+
+            ### Requirements
+            - Windows 10/11 (64-bit)
+            - .NET 8 Runtime ([download](https://dotnet.microsoft.com/download/dotnet/8.0))
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}

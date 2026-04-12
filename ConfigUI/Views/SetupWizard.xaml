@@ -1,0 +1,100 @@
+<Window x:Class="ConfigUI.Views.SetupWizard"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:md="http://materialdesigninxaml.net/winfx/xaml/themes"
+        Title="GoalKeeper Setup" Height="600" Width="700"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        Topmost="True"
+        Background="{DynamicResource MaterialDesign.Brush.Background}"
+        TextElement.Foreground="{DynamicResource MaterialDesign.Brush.Foreground}"
+        TextElement.FontFamily="{md:MaterialDesignFont}">
+
+    <Grid>
+        <Grid x:Name="PageAudit" Visibility="Visible" Margin="48">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,24">
+                <md:PackIcon Kind="ShieldOutline" Width="36" Height="36"
+                             Foreground="{DynamicResource MaterialDesign.Brush.Primary}"
+                             Margin="0,0,12,0"/>
+                <StackPanel>
+                    <TextBlock Text="Audit Mode Active" FontSize="24" FontWeight="Bold"/>
+                    <TextBlock Text="Training wheels are on. You can still kill the app via Task Manager."
+                               Opacity="0.6" FontSize="13"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- What Audit Mode means -->
+            <Border Grid.Row="1" CornerRadius="8" Padding="20"
+                    Background="{DynamicResource MaterialDesign.Brush.Card.Background}"
+                    Margin="0,0,0,24">
+                <StackPanel>
+                    <TextBlock Text="What Audit Mode means:" FontWeight="SemiBold" FontSize="15"
+                               Margin="0,0,0,12"/>
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <md:PackIcon Kind="Check" Foreground="LimeGreen" Margin="0,0,8,0"/>
+                            <TextBlock Text="All friction overlays, tracking, and blocking are ACTIVE"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <md:PackIcon Kind="Check" Foreground="LimeGreen" Margin="0,0,8,0"/>
+                            <TextBlock Text="You can still end GoalKeeper via Task Manager"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <md:PackIcon Kind="Close" Foreground="Tomato" Margin="0,0,8,0"/>
+                            <TextBlock Text="DACL tamper-proofing is NOT yet active"/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <md:PackIcon Kind="Close" Foreground="Tomato" Margin="0,0,8,0"/>
+                            <TextBlock Text="Reboot-immunity is NOT yet active"/>
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Arm system section -->
+            <StackPanel Grid.Row="2">
+                <TextBlock Text="Arm the System" FontSize="18" FontWeight="Bold"
+                           Margin="0,0,0,8"/>
+                <TextBlock TextWrapping="Wrap" Opacity="0.7" Margin="0,0,0,16"
+                           Text="Once you've verified everything works correctly, you can ARM the system. This will apply full OS-level tamper-proofing. Test all your blocklists and whitelists thoroughly first. If you accidentally block a critical Windows process, you can always recover by booting into Safe Mode."/>
+
+                <!-- Self-diagnostic panel -->
+                <Border CornerRadius="8" Padding="16"
+                        Background="{DynamicResource MaterialDesign.Brush.Card.Background}">
+                    <StackPanel>
+                        <TextBlock Text="System Self-Diagnostic" FontWeight="SemiBold"
+                                   Margin="0,0,0,8"/>
+                        <StackPanel x:Name="DiagPanel"/>
+                        <Button Content="Run Diagnostic" Margin="0,8,0,0"
+                                Style="{StaticResource MaterialDesignOutlinedButton}"
+                                Click="RunDiagnostic_Click"
+                                HorizontalAlignment="Left"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- Action buttons -->
+            <StackPanel Grid.Row="3" Orientation="Horizontal"
+                        HorizontalAlignment="Right" Margin="0,24,0,0">
+                <Button Content="Close"
+                        Style="{StaticResource MaterialDesignOutlinedButton}"
+                        Click="Close_Click"
+                        Margin="0,0,12,0"/>
+                <Button x:Name="ArmButton"
+                        Content="Arm System →"
+                        IsEnabled="False"
+                        Style="{StaticResource MaterialDesignRaisedButton}"
+                        Background="#CC2222"
+                        Click="ArmSystem_Click"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

@@ -1,0 +1,97 @@
+# .NET build artifacts
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.userprefs
+*.pidb
+*.ncb
+*.sdf
+*.opensdf
+*.vcxproj.filters
+*.VC.db
+*.VC.opendb
+[Rr]elease/
+[Dd]ebug/
+[Pp]ublish/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+*.exe
+*.dll
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Secrets / Credentials
+.env
+*.env
+*.key
+*.pem
+secrets.json
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Installer output
+Installer/Output/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# Developer safety bypass flag (intentionally NOT committed)
+C:/dev_bypass_flag.txt
