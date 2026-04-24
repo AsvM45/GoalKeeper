@@ -72,6 +72,11 @@ public partial class MainViewModel : ObservableObject
             "Dashboard"  => new DashboardPageViewModel(this),
             "Nuclear"    => new NuclearPageViewModel(this),
             "Security"   => new SecurityPageViewModel(this),
+            "Categories" => new CategoriesPageViewModel(),
+            "Budgets"    => new BudgetsPageViewModel(),
+            "Schedule"   => new SchedulePageViewModel(),
+            "AI Smart"   => new AISmartPageViewModel(),
+            "Settings"   => new SettingsPageViewModel(),
             _            => new PlaceholderPageViewModel(value.Label)
         };
     }
@@ -165,52 +170,77 @@ public class PlaceholderPageViewModel
 
 public partial class DashboardPageViewModel : ObservableObject
 {
-    private readonly MainViewModel _parent;
-
-    [ObservableProperty] private string _todayProductiveHours = "0h 0m";
-    [ObservableProperty] private string _todayDistractingHours = "0h 0m";
+    [ObservableProperty] private string _todayProductiveHours = "–";
+    [ObservableProperty] private string _todayDistractingHours = "–";
     [ObservableProperty] private int _todayPickups;
     [ObservableProperty] private int _productivityScore;
 
-    public DashboardPageViewModel(MainViewModel parent)
-    {
-        _parent = parent;
-        _ = LoadStatsAsync();
-    }
+    public DashboardPageViewModel(MainViewModel parent) { _ = LoadStatsAsync(); }
 
     private async Task LoadStatsAsync()
     {
-        // Stats are read directly from SQLite (read-only from UI)
-        await Task.CompletedTask; // Placeholder – full implementation reads from DB
+        try
+        {
+            var db = new AppDatabase();
+            var (prod, dist) = await db.GetTodayTimeAsync();
+            var pickups = await db.GetTodayPickupsAsync();
+
+            TodayProductiveHours   = FormatTime(prod);
+            TodayDistractingHours  = FormatTime(dist);
+            TodayPickups           = pickups;
+            ProductivityScore      = (prod + dist) == 0 ? 0
+                                     : (int)(prod * 100.0 / (prod + dist));
+        }
+        catch { /* DB not initialized yet – service not running */ }
+    }
+
+    private static string FormatTime(int seconds)
+    {
+        int h = seconds / 3600, m = (seconds % 3600) / 60;
+        return h > 0 ? $"{h}h {m}m" : m > 0 ? $"{m}m" : "0m";
     }
 }
+
+public record NuclearModeOption(string Value, string DisplayName, string Description, string Icon);
 
 public partial class NuclearPageViewModel : ObservableObject
 {
     private readonly MainViewModel _parent;
 
-    [ObservableProperty] private string _selectedMode = "nuclear_strict";
-    [ObservableProperty] private int _durationHours = 2;
-
-    public ObservableCollection<string> Modes { get; } =
+    public ObservableCollection<NuclearModeOption> Modes { get; } =
     [
-        "nuclear_strict",
-        "nuclear_offline",
-        "nuclear_whitelist"
+        new("nuclear_strict",    "Strict Blocklist",
+            "Immediately revokes all remaining daily allowances and enforces your full blocklist. Apps you haven't used yet still count.",
+            "BlockHelper"),
+        new("nuclear_offline",   "Full Offline",
+            "Blocks all browsers and internet-connected apps. Only offline tools remain accessible. Ideal for deep work sessions.",
+            "WifiOff"),
+        new("nuclear_whitelist", "Whitelist Only",
+            "Blocks everything except your explicitly approved productivity tools. Nothing outside your whitelist can launch.",
+            "FormatListChecks"),
     ];
 
-    public NuclearPageViewModel(MainViewModel parent) => _parent = parent;
+    [ObservableProperty] private NuclearModeOption? _selectedMode;
+    [ObservableProperty] private int _durationHours = 2;
+
+    public NuclearPageViewModel(MainViewModel parent)
+    {
+        _parent = parent;
+        _selectedMode = Modes[0];
+    }
 
     [RelayCommand]
     private async Task ActivateNuclearAsync()
     {
+        if (SelectedMode is null) return;
+
         var challenge = new Views.TypingChallenge();
         if (challenge.ShowDialog() != true || challenge.CompletionToken == null) return;
 
         var response = await App.Pipe.SendAsync(PipeMessage.Create(
             MessageType.ActivateNuclear, new
             {
-                mode = SelectedMode,
+                mode = SelectedMode.Value,
                 durationMinutes = DurationHours * 60,
                 challengeToken = challenge.CompletionToken
             }));
@@ -235,5 +265,264 @@ public partial class SecurityPageViewModel : ObservableObject
     {
         var wizard = new Views.SetupWizard();
         wizard.ShowDialog();
+    }
+}
+
+public partial class CategoriesPageViewModel : ObservableObject
+{
+    private readonly AppDatabase _db = new();
+
+    public ObservableCollection<CategoryRuleItem> Rules { get; } = [];
+
+    [ObservableProperty] private string _newPattern  = "";
+    [ObservableProperty] private string _newCategory = "distracting";
+    [ObservableProperty] private string _newRuleType = "app";
+    [ObservableProperty] private string _status = "";
+
+    public string[] CategoryOptions { get; } =
+        ["distracting", "productive", "neutral", "whitelist", "blacklist"];
+    public string[] RuleTypeOptions { get; } =
+        ["app", "domain", "window_title"];
+
+    public CategoriesPageViewModel() => _ = LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            var rows = await _db.GetCategoryRulesAsync();
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                Rules.Clear();
+                foreach (var r in rows)
+                    Rules.Add(new CategoryRuleItem(r.Id, r.Pattern, r.Category, r.RuleType));
+            });
+        }
+        catch (Exception ex) { Status = $"Could not load: {ex.Message}"; }
+    }
+
+    [RelayCommand]
+    private async Task AddRuleAsync()
+    {
+        if (string.IsNullOrWhiteSpace(NewPattern)) { Status = "Pattern cannot be empty."; return; }
+        if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.AddCategoryRule, new
+        {
+            pattern  = NewPattern.Trim(),
+            category = NewCategory,
+            ruleType = NewRuleType
+        }));
+        NewPattern = "";
+        Status = "Rule added.";
+        await Task.Delay(200); // brief wait for service to commit before re-reading
+        await LoadAsync();
+    }
+
+    [RelayCommand]
+    private async Task DeleteRuleAsync(CategoryRuleItem item)
+    {
+        if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.DeleteCategoryRule, new { id = item.Id }));
+        Application.Current.Dispatcher.Invoke(() => Rules.Remove(item));
+        Status = "Rule deleted.";
+    }
+}
+
+public record CategoryRuleItem(int Id, string Pattern, string Category, string RuleType);
+
+public partial class BudgetsPageViewModel : ObservableObject
+{
+    private readonly AppDatabase _db = new();
+
+    public ObservableCollection<BudgetItem> Budgets { get; } = [];
+
+    [ObservableProperty] private string _newCategory       = "";
+    [ObservableProperty] private int    _newAllowedMinutes = 60;
+    [ObservableProperty] private int    _newMaxLaunches    = -1;
+    [ObservableProperty] private int    _newSessionMinutes = 5;
+    [ObservableProperty] private int    _newFrictionSecs   = 20;
+    [ObservableProperty] private string _status            = "";
+
+    public BudgetsPageViewModel() => _ = LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            var rows = await _db.GetBudgetsAsync();
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                Budgets.Clear();
+                foreach (var b in rows)
+                    Budgets.Add(new BudgetItem
+                    {
+                        Category       = b.Category,
+                        AllowedMinutes = b.AllowedSeconds / 60,
+                        UsedMinutes    = b.UsedSeconds    / 60,
+                        MaxLaunches    = b.MaxLaunches,
+                        UsedLaunches   = b.UsedLaunches,
+                        SessionMinutes = b.SessionMinutes,
+                        FrictionSecs   = b.FrictionSeconds,
+                    });
+            });
+        }
+        catch (Exception ex) { Status = $"Could not load: {ex.Message}"; }
+    }
+
+    [RelayCommand]
+    private async Task AddBudgetAsync()
+    {
+        if (string.IsNullOrWhiteSpace(NewCategory)) { Status = "Category name cannot be empty."; return; }
+        if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.UpsertBudget, new
+        {
+            category        = NewCategory.Trim(),
+            allowedSeconds  = NewAllowedMinutes * 60,
+            maxLaunches     = NewMaxLaunches,
+            sessionMinutes  = NewSessionMinutes,
+            frictionSeconds = NewFrictionSecs
+        }));
+        NewCategory = "";
+        Status = "Budget saved.";
+        await Task.Delay(200);
+        await LoadAsync();
+    }
+
+    [RelayCommand]
+    private async Task DeleteBudgetAsync(BudgetItem item)
+    {
+        if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.DeleteBudget, new { category = item.Category }));
+        Application.Current.Dispatcher.Invoke(() => Budgets.Remove(item));
+        Status = "Budget deleted.";
+    }
+}
+
+public class BudgetItem
+{
+    public string Category       { get; set; } = "";
+    public int    AllowedMinutes { get; set; }
+    public int    UsedMinutes    { get; set; }
+    public int    MaxLaunches    { get; set; }
+    public int    UsedLaunches   { get; set; }
+    public int    SessionMinutes { get; set; }
+    public int    FrictionSecs   { get; set; }
+}
+
+public partial class SchedulePageViewModel : ObservableObject
+{
+    private readonly AppDatabase _db = new();
+
+    [ObservableProperty] private bool   _downtimeEnabled = false;
+    [ObservableProperty] private string _downtimeStart   = "22:00";
+    [ObservableProperty] private string _downtimeEnd     = "07:00";
+    [ObservableProperty] private string _status          = "";
+
+    public SchedulePageViewModel() => _ = LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            DowntimeEnabled = (await _db.GetStateAsync("DowntimeEnabled")) == "1";
+            DowntimeStart   = (await _db.GetStateAsync("DowntimeStart"))   ?? "22:00";
+            DowntimeEnd     = (await _db.GetStateAsync("DowntimeEnd"))     ?? "07:00";
+        }
+        catch { /* DB not ready */ }
+    }
+
+    [RelayCommand]
+    private async Task SaveAsync()
+    {
+        if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "DowntimeEnabled", value = DowntimeEnabled ? "1" : "0" }));
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "DowntimeStart", value = DowntimeStart }));
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "DowntimeEnd", value = DowntimeEnd }));
+        Status = "Saved. Changes take effect immediately.";
+    }
+}
+
+public partial class AISmartPageViewModel : ObservableObject
+{
+    private readonly AppDatabase _db = new();
+
+    [ObservableProperty] private string _apiKey     = "";
+    [ObservableProperty] private bool   _aiEnabled  = false;
+    [ObservableProperty] private string _userGoals  = "";
+    [ObservableProperty] private string _status     = "";
+    [ObservableProperty] private bool   _isSaving   = false;
+
+    public AISmartPageViewModel() => _ = LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            ApiKey    = (await _db.GetStateAsync("AIApiKey"))  ?? "";
+            AiEnabled = (await _db.GetStateAsync("AIEnabled")) == "1";
+            var json  = (await _db.GetStateAsync("UserGoals")) ?? "[]";
+            var goals = System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) ?? [];
+            UserGoals = string.Join("\n", goals);
+        }
+        catch { /* DB not ready */ }
+    }
+
+    [RelayCommand]
+    private async Task SaveAsync()
+    {
+        if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
+        IsSaving = true;
+        Status   = "";
+        var goals = UserGoals
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToList();
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "AIApiKey",  value = ApiKey.Trim() }));
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "AIEnabled", value = AiEnabled ? "1" : "0" }));
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "UserGoals", value = System.Text.Json.JsonSerializer.Serialize(goals) }));
+        Status   = "Saved successfully.";
+        IsSaving = false;
+    }
+}
+
+public partial class SettingsPageViewModel : ObservableObject
+{
+    private readonly AppDatabase _db = new();
+
+    [ObservableProperty] private bool   _frictionEnabled     = true;
+    [ObservableProperty] private int    _frictionDelaySeconds = 20;
+    [ObservableProperty] private bool   _aiEnabled            = false;
+    [ObservableProperty] private string _status               = "";
+
+    public SettingsPageViewModel() => _ = LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            FrictionEnabled      = (await _db.GetStateAsync("FrictionEnabled")) != "0";
+            AiEnabled            = (await _db.GetStateAsync("AIEnabled"))       == "1";
+            var fStr             = await _db.GetStateAsync("FrictionSeconds");
+            if (int.TryParse(fStr, out int fs)) FrictionDelaySeconds = fs;
+        }
+        catch { /* DB not ready */ }
+    }
+
+    [RelayCommand]
+    private async Task SaveAsync()
+    {
+        if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "FrictionEnabled", value = FrictionEnabled ? "1" : "0" }));
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "FrictionSeconds", value = FrictionDelaySeconds.ToString() }));
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "AIEnabled", value = AiEnabled ? "1" : "0" }));
+        Status = "Saved. Changes take effect on next app launch.";
     }
 }

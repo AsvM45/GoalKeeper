@@ -245,7 +245,84 @@ public sealed class ScreenTimeLogger : IDisposable
         }
     }
 
-    // ── Category Rules ────────────────────────────────────────────────────────
+    // ── Category Rule CRUD ────────────────────────────────────────────────────
+
+    public async Task AddCategoryRuleAsync(string pattern, string category, string ruleType)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync();
+            await using var cmd = new SqliteCommand(
+                "INSERT INTO CategoryRules (Pattern, Category, RuleType) VALUES (@p, @c, @t)", conn);
+            cmd.Parameters.AddWithValue("@p", pattern);
+            cmd.Parameters.AddWithValue("@c", category);
+            cmd.Parameters.AddWithValue("@t", ruleType);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally { _lock.Release(); }
+    }
+
+    public async Task DeleteCategoryRuleAsync(int id)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync();
+            await using var cmd = new SqliteCommand(
+                "DELETE FROM CategoryRules WHERE Id = @id", conn);
+            cmd.Parameters.AddWithValue("@id", id);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally { _lock.Release(); }
+    }
+
+    // ── Budget CRUD ───────────────────────────────────────────────────────────
+
+    public async Task UpsertBudgetAsync(string category, int allowedSecs, int maxLaunches,
+                                         int sessionMinutes, int frictionSecs)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync();
+            await using var cmd = new SqliteCommand(@"
+                INSERT INTO Budgets (Category, AllowedSeconds, MaxLaunches, SessionMinutes, FrictionSeconds)
+                VALUES (@cat, @allowed, @launches, @session, @friction)
+                ON CONFLICT(Category) DO UPDATE SET
+                    AllowedSeconds  = @allowed,
+                    MaxLaunches     = @launches,
+                    SessionMinutes  = @session,
+                    FrictionSeconds = @friction", conn);
+            cmd.Parameters.AddWithValue("@cat",      category);
+            cmd.Parameters.AddWithValue("@allowed",  allowedSecs);
+            cmd.Parameters.AddWithValue("@launches", maxLaunches);
+            cmd.Parameters.AddWithValue("@session",  sessionMinutes);
+            cmd.Parameters.AddWithValue("@friction", frictionSecs);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally { _lock.Release(); }
+    }
+
+    public async Task DeleteBudgetAsync(string category)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync();
+            await using var cmd = new SqliteCommand(
+                "DELETE FROM Budgets WHERE Category = @cat", conn);
+            cmd.Parameters.AddWithValue("@cat", category);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally { _lock.Release(); }
+    }
+
+    // ── Category Rules (read) ─────────────────────────────────────────────────
 
     public async Task<string?> GetCategoryForAppAsync(string appName)
         => await GetCategoryByPatternAsync(appName, "app");

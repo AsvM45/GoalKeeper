@@ -29,7 +29,7 @@ A VM snapshot lets you restore your environment in seconds if something goes wro
 ### Step 2: Get a Windows 11 VM Image
 1. Go to [microsoft.com/en-us/software-download/windows11](https://www.microsoft.com/en-us/software-download/windows11)
 2. Download the **Windows 11 Installation Media**
-3. OR use: [developer.microsoft.com/en-us/windows/downloads/virtual-machines/](https://developer.microsoft.com/en-us/windows/downloads/virtual-machines/) for pre-built VM images
+3. OR use: [microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise) for the 90-day evaluation ISO (the old pre-built VM download page no longer works as of early 2026)
 
 ### Step 3: Create the VM
 ```powershell
@@ -66,9 +66,12 @@ Hyper-V Manager → Select VM → Checkpoints → Right-click → Apply
 [virtualbox.org/wiki/Downloads](https://www.virtualbox.org/wiki/Downloads)
 Download: `VirtualBox-x.x.x-Win.exe` and install it.
 
-### Step 2: Download Windows 11 Dev VM
-[developer.microsoft.com/en-us/windows/downloads/virtual-machines/](https://developer.microsoft.com/en-us/windows/downloads/virtual-machines/)
-Select **VirtualBox** format. This is a pre-activated 90-day evaluation VM.
+### Step 2: Download a Windows 11 VM Image
+> **Note**: Microsoft's pre-built Windows 11 dev VM page (`developer.microsoft.com/en-us/windows/downloads/virtual-machines/`) no longer works — it redirects to an unrelated page as of early 2026.
+
+Use one of these alternatives instead:
+- **Windows 11 Enterprise Evaluation (ISO)**: [microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-11-enterprise) — free 90-day eval, download the ISO and create the VM manually in VirtualBox.
+- **Windows 11 Installation Media**: [microsoft.com/en-us/software-download/windows11](https://www.microsoft.com/en-us/software-download/windows11) — download the ISO, use "I don't have a product key" during setup.
 
 ### Step 3: Import the VM
 1. Open VirtualBox → File → Import Appliance

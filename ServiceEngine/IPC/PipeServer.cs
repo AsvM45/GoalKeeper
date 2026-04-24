@@ -216,9 +216,6 @@ public sealed class PipeServer : BackgroundService
 
             case MessageType.SetAIKey:
             {
-                var token = msg.GetString("challengeToken") ?? "";
-                bool valid = await _db.ConsumeTokenAsync(token);
-                if (!valid) return null;
                 var key = msg.GetString("apiKey") ?? "";
                 await _db.SetStateAsync("AIApiKey", key);
                 return null;
@@ -226,11 +223,58 @@ public sealed class PipeServer : BackgroundService
 
             case MessageType.OverrideAI:
             {
-                // UI user manually overrides an AI decision
                 var urlOrApp = msg.GetString("urlOrApp") ?? "";
                 var override_ = msg.GetString("override") ?? "allow";
-                // Store override in AICache via direct DB
                 await _db.UpsertAICacheAsync(urlOrApp, override_, 1.0, "User override", null);
+                return null;
+            }
+
+            // ── Config writes (need admin DB write rights, so routed through service) ──
+
+            case MessageType.SetState:
+            {
+                var key   = msg.GetString("key")   ?? "";
+                var value = msg.GetString("value") ?? "";
+                if (!string.IsNullOrEmpty(key))
+                    await _db.SetStateAsync(key, value);
+                return null;
+            }
+
+            case MessageType.AddCategoryRule:
+            {
+                var pattern  = msg.GetString("pattern")  ?? "";
+                var category = msg.GetString("category") ?? "";
+                var ruleType = msg.GetString("ruleType") ?? "app";
+                if (!string.IsNullOrEmpty(pattern) && !string.IsNullOrEmpty(category))
+                    await _db.AddCategoryRuleAsync(pattern, category, ruleType);
+                return null;
+            }
+
+            case MessageType.DeleteCategoryRule:
+            {
+                var id = msg.GetInt("id");
+                if (id > 0)
+                    await _db.DeleteCategoryRuleAsync(id);
+                return null;
+            }
+
+            case MessageType.UpsertBudget:
+            {
+                var category     = msg.GetString("category") ?? "";
+                var allowedSecs  = msg.GetInt("allowedSeconds");
+                var maxLaunches  = msg.GetInt("maxLaunches", -1);
+                var sessionMins  = msg.GetInt("sessionMinutes", 5);
+                var frictionSecs = msg.GetInt("frictionSeconds", 20);
+                if (!string.IsNullOrEmpty(category))
+                    await _db.UpsertBudgetAsync(category, allowedSecs, maxLaunches, sessionMins, frictionSecs);
+                return null;
+            }
+
+            case MessageType.DeleteBudget:
+            {
+                var category = msg.GetString("category") ?? "";
+                if (!string.IsNullOrEmpty(category))
+                    await _db.DeleteBudgetAsync(category);
                 return null;
             }
 

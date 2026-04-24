@@ -24,25 +24,51 @@ public sealed class PipeClient : IDisposable
 
     public bool IsConnected => _pipe?.IsConnected == true;
 
+    // #region agent log
+    private static readonly string _logPath = Path.Combine(
+        @"C:\Users\asvat\OneDrive\Documents\GitHub\GoalKeeper\GoalKeeper", "debug-df88ca.log");
+    private static void DbgLog(string msg, string hyp, object? data = null)
+    {
+        try
+        {
+            var entry = JsonSerializer.Serialize(new
+            {
+                sessionId = "df88ca", timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                location = "PipeClient.cs", hypothesisId = hyp, message = msg, data
+            });
+            File.AppendAllText(_logPath, entry + "\n");
+        }
+        catch { }
+    }
+    // #endregion
+
     public async Task ConnectAsync()
     {
         _cts = new CancellationTokenSource();
+        int attempt = 0;
         while (!_disposed)
         {
+            attempt++;
             try
             {
                 _pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut,
                     PipeOptions.Asynchronous | PipeOptions.WriteThrough);
 
                 await _pipe.ConnectAsync(3000, _cts.Token);
+                // #region agent log
+                DbgLog("ConnectAsync succeeded", "B", new { attempt });
+                // #endregion
                 ConnectionChanged?.Invoke(true);
 
                 _ = Task.Run(() => ReadLoopAsync(_cts.Token));
                 return;
             }
             catch (OperationCanceledException) { return; }
-            catch
+            catch (Exception ex)
             {
+                // #region agent log
+                DbgLog("ConnectAsync failed, retrying", "B", new { attempt, error = ex.Message });
+                // #endregion
                 await Task.Delay(3000);
                 _pipe?.Dispose();
                 _pipe = null;
@@ -61,15 +87,25 @@ public sealed class PipeClient : IDisposable
                 if (read == 0) break;
 
                 var json = Encoding.UTF8.GetString(buffer, 0, read);
+                // #region agent log
+                DbgLog("ReadLoopAsync received message", "A/C", new { type = PipeMessage.Deserialize(json)?.Type });
+                // #endregion
                 var msg = PipeMessage.Deserialize(json);
                 if (msg != null)
                 {
                     Application.Current.Dispatcher.Invoke(() => MessageReceived?.Invoke(msg));
                 }
             }
+            // #region agent log
+            DbgLog("ReadLoopAsync loop ended (read==0 or disconnected)", "A/C",
+                new { isConnected = _pipe?.IsConnected });
+            // #endregion
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // #region agent log
+            DbgLog("ReadLoopAsync exception — triggering reconnect", "A/C", new { error = ex.Message });
+            // #endregion
             Application.Current.Dispatcher.Invoke(() => ConnectionChanged?.Invoke(false));
             // Auto-reconnect
             if (!_disposed)
@@ -94,6 +130,39 @@ public sealed class PipeClient : IDisposable
             return PipeMessage.Deserialize(Encoding.UTF8.GetString(buffer, 0, read));
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Sends a message and does NOT wait for a response.
+    /// Use for config-write commands where the server returns null (no ACK).
+    /// Avoids the cancellation-on-timeout pattern that breaks the pipe handle on Windows.
+    /// </summary>
+    public async Task FireAndForgetAsync(PipeMessage message)
+    {
+        // #region agent log
+        DbgLog("FireAndForgetAsync called", "D", new
+        {
+            msgType   = message.Type,
+            pipeNull  = _pipe == null,
+            isConnected = _pipe?.IsConnected
+        });
+        // #endregion
+        if (_pipe?.IsConnected != true) return;
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes(message.Serialize());
+            await _pipe.WriteAsync(bytes);
+            await _pipe.FlushAsync();
+            // #region agent log
+            DbgLog("FireAndForgetAsync sent OK", "D", new { msgType = message.Type });
+            // #endregion
+        }
+        catch (Exception ex)
+        {
+            // #region agent log
+            DbgLog("FireAndForgetAsync write failed", "D", new { msgType = message.Type, error = ex.Message });
+            // #endregion
+        }
     }
 
     public void Dispose()
@@ -157,4 +226,11 @@ public static class MessageType
     public const string SetAIKey         = "SET_AI_KEY";
     public const string OverrideAI       = "OVERRIDE_AI";
     public const string ResumeProcess    = "RESUME_PROCESS";
+
+    // Config writes — routed through service (admin write rights to DB)
+    public const string SetState           = "SET_STATE";
+    public const string AddCategoryRule    = "ADD_CATEGORY_RULE";
+    public const string DeleteCategoryRule = "DELETE_CATEGORY_RULE";
+    public const string UpsertBudget       = "UPSERT_BUDGET";
+    public const string DeleteBudget       = "DELETE_BUDGET";
 }

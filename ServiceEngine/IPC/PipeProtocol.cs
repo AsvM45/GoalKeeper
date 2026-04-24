@@ -14,17 +14,24 @@ public static class MessageType
     public const string DiagnosticResult = "DIAGNOSTIC_RESULT";
 
     // UI → Service
-    public const string AllowSession    = "ALLOW_SESSION";
-    public const string EnforceClose    = "ENFORCE_CLOSE";
-    public const string UpdateSettings  = "UPDATE_SETTINGS";
-    public const string ArmSystem       = "ARM_SYSTEM";
-    public const string ActivateNuclear = "ACTIVATE_NUCLEAR";
+    public const string AllowSession      = "ALLOW_SESSION";
+    public const string EnforceClose      = "ENFORCE_CLOSE";
+    public const string UpdateSettings    = "UPDATE_SETTINGS";
+    public const string ArmSystem         = "ARM_SYSTEM";
+    public const string ActivateNuclear   = "ACTIVATE_NUCLEAR";
     public const string DeactivateNuclear = "DEACTIVATE_NUCLEAR";
-    public const string RunDiagnostics  = "RUN_DIAGNOSTICS";
-    public const string GetState        = "GET_STATE";
-    public const string SetAIKey        = "SET_AI_KEY";
-    public const string OverrideAI      = "OVERRIDE_AI";
-    public const string ResumeProcess   = "RESUME_PROCESS";
+    public const string RunDiagnostics    = "RUN_DIAGNOSTICS";
+    public const string GetState          = "GET_STATE";
+    public const string SetAIKey          = "SET_AI_KEY";
+    public const string OverrideAI        = "OVERRIDE_AI";
+    public const string ResumeProcess     = "RESUME_PROCESS";
+
+    // Config writes (routed through service so it has admin write rights to the DB)
+    public const string SetState           = "SET_STATE";
+    public const string AddCategoryRule    = "ADD_CATEGORY_RULE";
+    public const string DeleteCategoryRule = "DELETE_CATEGORY_RULE";
+    public const string UpsertBudget       = "UPSERT_BUDGET";
+    public const string DeleteBudget       = "DELETE_BUDGET";
 }
 
 // ── Base message ──────────────────────────────────────────────────────────────
