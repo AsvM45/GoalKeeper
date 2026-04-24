@@ -47,7 +47,7 @@ public sealed class PipeServer : BackgroundService
                 _activeClients.Add(pipe);
                 _clientLock.Release();
 
-                _ = Task.Run(() => HandleClientAsync(pipe, stoppingToken), stoppingToken);
+                SafeTask.Run(() => HandleClientAsync(pipe, stoppingToken), _log, "PipeServer_HandleClient");
             }
             catch (OperationCanceledException)
             {
@@ -85,19 +85,27 @@ public sealed class PipeServer : BackgroundService
                 var msg = PipeMessage.Deserialize(json);
                 if (msg == null) continue;
 
-                _log.LogDebug("Received: {Type}", msg.Type);
-                var response = await ProcessMessageAsync(msg);
-                if (response != null)
+                _log.LogInformation("Received: {Type} | Raw: {Json}", msg.Type, json.Substring(0, Math.Min(json.Length, 200)));
+                try
                 {
-                    var bytes = Encoding.UTF8.GetBytes(response.Serialize());
-                    await pipe.WriteAsync(bytes, ct);
-                    await pipe.FlushAsync(ct);
+                    var response = await ProcessMessageAsync(msg);
+                    if (response != null)
+                    {
+                        var bytes = Encoding.UTF8.GetBytes(response.Serialize());
+                        await pipe.WriteAsync(bytes, ct);
+                        await pipe.FlushAsync(ct);
+                    }
+                }
+                catch (Exception procEx)
+                {
+                    _log.LogError(procEx, "Error processing {Type}", msg.Type);
+                    // Don't kill the connection — continue reading next message
                 }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _log.LogDebug("Client disconnected: {E}", ex.Message);
+            _log.LogError("Client handler error: {E}", ex.Message);
         }
         finally
         {
@@ -185,7 +193,7 @@ public sealed class PipeServer : BackgroundService
                 }
 
                 var mode = msg.GetString("mode") ?? "nuclear_strict";
-                int minutes = msg.GetInt("durationMinutes", 60);
+                int minutes = SecurityEnforcer.ClampNuclearDuration(msg.GetInt("durationMinutes", 60));
                 var endEpoch = DateTimeOffset.Now.AddMinutes(minutes).ToUnixTimeSeconds();
 
                 await _db.SetStateAsync("ActiveMode", mode);
@@ -275,6 +283,14 @@ public sealed class PipeServer : BackgroundService
                 var category = msg.GetString("category") ?? "";
                 if (!string.IsNullOrEmpty(category))
                     await _db.DeleteBudgetAsync(category);
+                return null;
+            }
+
+            case "STORE_TOKEN":
+            {
+                var token = msg.GetString("token") ?? "";
+                if (!string.IsNullOrEmpty(token))
+                    await _db.StoreTokenAsync(token);
                 return null;
             }
 

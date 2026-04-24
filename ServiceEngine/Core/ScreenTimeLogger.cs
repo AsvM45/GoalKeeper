@@ -16,13 +16,42 @@ public sealed class ScreenTimeLogger : IDisposable
     private readonly List<ScreenTimeEntry> _buffer = new();
     private readonly System.Timers.Timer _flushTimer;
 
-    public ScreenTimeLogger()
+    public ScreenTimeLogger(string? testDbPath = null)
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        var dir = Path.Combine(appData, "GoalKeeper");
-        Directory.CreateDirectory(dir);
-        _dbPath = Path.Combine(dir, "metrics.sqlite");
-        _connectionString = $"Data Source={_dbPath};";
+        if (testDbPath != null)
+        {
+            _dbPath = testDbPath;
+        }
+        else
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            var dir = Path.Combine(appData, "GoalKeeper");
+            
+            if (!Directory.Exists(dir))
+        {
+            Directory.CreateDirectory(dir);
+            try
+            {
+                var dInfo = new DirectoryInfo(dir);
+                var sec = dInfo.GetAccessControl();
+                sec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
+                    System.Security.AccessControl.FileSystemRights.FullControl,
+                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                    System.Security.AccessControl.PropagationFlags.None,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                dInfo.SetAccessControl(sec);
+            }
+            catch { /* Best effort */ }
+        }
+
+        }
+        if (testDbPath == null)
+        {
+            _dbPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GoalKeeper", "metrics.sqlite");
+        }
+        // Enable a 5-second automatic busy timeout to handle ConfigUI concurrent locks
+        _connectionString = $"Data Source={_dbPath};Default Timeout=5;";
 
         _flushTimer = new System.Timers.Timer(5000);
         _flushTimer.Elapsed += async (_, _) => await FlushBufferAsync();
@@ -44,6 +73,11 @@ public sealed class ScreenTimeLogger : IDisposable
 
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync();
+
+        // Persist WAL mode to allow concurrent multi-process Readers/Writers
+        await using var walCmd = new SqliteCommand("PRAGMA journal_mode=WAL;", conn);
+        await walCmd.ExecuteNonQueryAsync();
+
         await using var cmd = new SqliteCommand(schema, conn);
         await cmd.ExecuteNonQueryAsync();
     }
@@ -232,7 +266,8 @@ public sealed class ScreenTimeLogger : IDisposable
         await using var checkCmd = new SqliteCommand(
             "SELECT LastResetDate FROM Budgets WHERE Category = @cat", conn);
         checkCmd.Parameters.AddWithValue("@cat", category);
-        var lastReset = (string?)await checkCmd.ExecuteScalarAsync();
+        var result = await checkCmd.ExecuteScalarAsync();
+        var lastReset = result as string;
 
         if (lastReset != today)
         {

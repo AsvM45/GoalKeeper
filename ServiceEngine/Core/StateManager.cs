@@ -36,7 +36,11 @@ public sealed class StateManager
     /// </summary>
     public async Task<EnforcementDecision> EvaluateAsync(string appName, string? windowTitle, string? domain)
     {
-        _log.LogDebug("Evaluating {App} / {Title}", appName, windowTitle);
+        _log.LogInformation("Evaluating {App} / {Title}", appName, windowTitle);
+
+        // 0. Emergency stop? — Runtime kill-switch, always allow everything.
+        if (SecurityEnforcer.IsEmergencyStopActive())
+            return new EnforcementDecision(EnforcementAction.Allow, "Emergency stop file active");
 
         // 1. Nuclear Mode?
         if (await IsNuclearActiveAsync())
@@ -117,6 +121,12 @@ public sealed class StateManager
 
             if (budget.MaxLaunches >= 0 && budget.UsedLaunches >= budget.MaxLaunches)
                 return new EnforcementDecision(EnforcementAction.Kill, $"Launch limit reached for {category}");
+
+            lock (_timerLock)
+            {
+                if (_sessionTimers.ContainsKey(appName))
+                    return new EnforcementDecision(EnforcementAction.Allow, "Session active");
+            }
 
             // 5. Trigger friction overlay
             return new EnforcementDecision(

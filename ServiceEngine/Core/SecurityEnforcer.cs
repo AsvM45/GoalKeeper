@@ -8,12 +8,19 @@ namespace ServiceEngine.Core;
 /// Applies OS-level tamper-proofing when the system is in Armed Mode.
 /// All operations here are gated behind IsArmed == true.
 /// In dev mode (dev_bypass_flag.txt exists), this class is a no-op.
+/// Emergency stop: if C:\goalkeeper_emergency_stop.txt exists, all protection is skipped.
 /// </summary>
 public sealed class SecurityEnforcer
 {
     private readonly ScreenTimeLogger _db;
     private readonly bool _devMode;
     private readonly ILogger<SecurityEnforcer>? _log;
+
+    /// <summary>Maximum allowed Nuclear Mode duration (24 hours).</summary>
+    public const int MaxNuclearDurationMinutes = 1440;
+
+    /// <summary>Path to the runtime emergency stop file.</summary>
+    public const string EmergencyStopPath = @"C:\goalkeeper_emergency_stop.txt";
 
     public SecurityEnforcer(ScreenTimeLogger db, bool devMode, ILogger<SecurityEnforcer>? log = null)
     {
@@ -23,8 +30,14 @@ public sealed class SecurityEnforcer
     }
 
     /// <summary>
+    /// Checks whether the runtime emergency stop file exists.
+    /// </summary>
+    public static bool IsEmergencyStopActive() => File.Exists(EmergencyStopPath);
+
+    /// <summary>
     /// Called on service startup. If nuclear mode persisted across reboot,
     /// re-engages locks before opening any IPC pipes.
+    /// Includes startup self-test: if diagnostics fail, auto-disarms.
     /// </summary>
     public async Task ApplyStartupLocksAsync()
     {
@@ -34,8 +47,23 @@ public sealed class SecurityEnforcer
             return;
         }
 
+        if (IsEmergencyStopActive())
+        {
+            _log?.LogWarning("EMERGENCY STOP FILE DETECTED ({Path}) – skipping all security enforcement.", EmergencyStopPath);
+            return;
+        }
+
         var isArmed = await _db.GetStateAsync("IsArmed");
         if (isArmed != "1") return;
+
+        // Startup self-test: auto-disarm if diagnostics fail
+        var diag = await RunDiagnosticsAsync();
+        if (!diag.Success)
+        {
+            _log?.LogCritical("Startup self-test FAILED: {Reason}. Auto-disarming to prevent bricking.", diag.FailureReason);
+            await _db.SetStateAsync("IsArmed", "0");
+            return;
+        }
 
         var mode = await _db.GetStateAsync("ActiveMode");
         if (string.IsNullOrEmpty(mode) || mode == "none") return;
@@ -66,6 +94,12 @@ public sealed class SecurityEnforcer
             return;
         }
 
+        if (IsEmergencyStopActive())
+        {
+            _log?.LogWarning("ArmSystem blocked by emergency stop file.");
+            throw new InvalidOperationException("Emergency stop file is present. Remove it before arming.");
+        }
+
         // Run self-diagnostic
         var diag = await RunDiagnosticsAsync();
         if (!diag.Success)
@@ -75,6 +109,15 @@ public sealed class SecurityEnforcer
         ApplyDaclProtection();
         EnsureRegistryPersistence();
         _log?.LogInformation("System armed successfully.");
+    }
+
+    /// <summary>
+    /// Validates a Nuclear Mode duration request. Caps at MaxNuclearDurationMinutes.
+    /// </summary>
+    public static int ClampNuclearDuration(int requestedMinutes)
+    {
+        if (requestedMinutes <= 0) return 60; // Default 1 hour
+        return Math.Min(requestedMinutes, MaxNuclearDurationMinutes);
     }
 
     public async Task<DiagnosticResult> RunDiagnosticsAsync()
@@ -113,6 +156,12 @@ public sealed class SecurityEnforcer
 
     private void ApplyDaclProtection()
     {
+        if (IsEmergencyStopActive())
+        {
+            _log?.LogWarning("DACL protection skipped – emergency stop file is present.");
+            return;
+        }
+
         try
         {
             var pid = Environment.ProcessId;
@@ -129,7 +178,7 @@ public sealed class SecurityEnforcer
                 SE_OBJECT_TYPE.SE_KERNEL_OBJECT,
                 DACL_SECURITY_INFORMATION,
                 IntPtr.Zero, IntPtr.Zero,
-                out IntPtr pDacl, IntPtr.Zero,
+                out IntPtr pOldDacl, IntPtr.Zero,
                 out IntPtr pSD);
 
             if (result != 0)
@@ -139,23 +188,70 @@ public sealed class SecurityEnforcer
                 return;
             }
 
-            // Build a new DACL with a Deny ACE for PROCESS_TERMINATE for Interactive Users
+            // Build a new DACL by getting old ACL info, allocating a larger buffer, and copying ACEs
+            if (!GetAclInformation(pOldDacl, out ACL_SIZE_INFORMATION aclInfo, (uint)Marshal.SizeOf<ACL_SIZE_INFORMATION>(), ACL_INFORMATION_CLASS.AclSizeInformation))
+            {
+                _log?.LogError("GetAclInformation failed. LastError={E}", Marshal.GetLastWin32Error());
+                CloseHandle(hProcess);
+                return;
+            }
+
+            // Build SID for Interactive Users
             var sid = new SecurityIdentifier(WellKnownSidType.InteractiveSid, null);
             byte[] sidBytes = new byte[sid.BinaryLength];
             sid.GetBinaryForm(sidBytes, 0);
 
-            // Add DENY ACE for PROCESS_TERMINATE (0x0001)
-            AddAccessDeniedAce(pDacl, ACL_REVISION, PROCESS_TERMINATE, sidBytes);
+            // Calculate new DACL size: old used bytes + space for a new ACCESS_DENIED_ACE
+            // ACE header (4) + mask (4) + SID length
+            uint newAceSize = (uint)(8 + sidBytes.Length);
+            uint newDaclSize = aclInfo.AclBytesInUse + newAceSize;
 
-            SetSecurityInfo(
-                hProcess,
-                SE_OBJECT_TYPE.SE_KERNEL_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                IntPtr.Zero, IntPtr.Zero,
-                pDacl, IntPtr.Zero);
+            IntPtr pNewDacl = Marshal.AllocHGlobal((int)newDaclSize);
+            try
+            {
+                // Initialize the new ACL
+                if (!InitializeAcl(pNewDacl, newDaclSize, ACL_REVISION))
+                {
+                    _log?.LogError("InitializeAcl failed. LastError={E}", Marshal.GetLastWin32Error());
+                    return;
+                }
+
+                // Add our DENY ACE first (deny ACEs should precede allow ACEs)
+                if (!AddAccessDeniedAce(pNewDacl, ACL_REVISION, PROCESS_TERMINATE, sidBytes))
+                {
+                    _log?.LogError("AddAccessDeniedAce failed. LastError={E}", Marshal.GetLastWin32Error());
+                    return;
+                }
+
+                // Copy existing ACEs from the old DACL
+                for (uint i = 0; i < aclInfo.AceCount; i++)
+                {
+                    if (GetAce(pOldDacl, i, out IntPtr pAce))
+                        AddAce(pNewDacl, ACL_REVISION, 0xFFFFFFFF, pAce, (uint)Marshal.ReadInt16(pAce, 2)); // AceSize at offset 2
+                }
+
+                // Apply the new DACL to the process
+                var setResult = SetSecurityInfo(
+                    hProcess,
+                    SE_OBJECT_TYPE.SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    IntPtr.Zero, IntPtr.Zero,
+                    pNewDacl, IntPtr.Zero);
+
+                if (setResult != 0)
+                    _log?.LogError("SetSecurityInfo failed: {R}", setResult);
+                else
+                    _log?.LogInformation("DACL protection applied – Task Manager cannot terminate service.");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(pNewDacl);
+            }
+
+            if (pSD != IntPtr.Zero)
+                LocalFree(pSD);
 
             CloseHandle(hProcess);
-            _log?.LogInformation("DACL protection applied – Task Manager cannot terminate service.");
         }
         catch (Exception ex)
         {
@@ -185,12 +281,24 @@ public sealed class SecurityEnforcer
     private const uint ACL_REVISION = 2;
 
     private enum SE_OBJECT_TYPE { SE_KERNEL_OBJECT = 6 }
+    private enum ACL_INFORMATION_CLASS { AclSizeInformation = 2 }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ACL_SIZE_INFORMATION
+    {
+        public uint AceCount;
+        public uint AclBytesInUse;
+        public uint AclBytesFree;
+    }
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr hMem);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint GetSecurityInfo(
@@ -205,8 +313,23 @@ public sealed class SecurityEnforcer
         IntPtr pDacl, IntPtr pSacl);
 
     [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool InitializeAcl(IntPtr pAcl, uint nAclLength, uint dwAclRevision);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool AddAccessDeniedAce(
         IntPtr pAcl, uint revision, uint accessMask, byte[] pSid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetAclInformation(
+        IntPtr pAcl, out ACL_SIZE_INFORMATION pAclInformation, uint nAclInformationLength,
+        ACL_INFORMATION_CLASS dwAclInformationClass);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetAce(IntPtr pAcl, uint dwAceIndex, out IntPtr pAce);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AddAce(
+        IntPtr pAcl, uint dwAclRevision, uint dwStartingAceIndex, IntPtr pAceList, uint nAceListLength);
 }
 
 public record DiagnosticResult(bool Success, string? FailureReason);

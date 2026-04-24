@@ -1,97 +1,23 @@
-# .NET build artifacts
+# .NET Core
 bin/
 obj/
 *.user
 *.suo
 .vs/
-*.userprefs
-*.pidb
-*.ncb
-*.sdf
-*.opensdf
-*.vcxproj.filters
-*.VC.db
-*.VC.opendb
-[Rr]elease/
-[Dd]ebug/
-[Pp]ublish/
-x64/
-x86/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Bb]in/
-[Oo]bj/
-[Ll]og/
-[Ll]ogs/
-*.exe
-*.dll
-*.pdb
+*.db
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-*.pyc
-*.pyo
-*.pyd
+
+# Logs & Config
+debug-*.log
 .env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+secret.key
 
-# Secrets / Credentials
-.env
-*.env
-*.key
-*.pem
-secrets.json
-
-# Databases
-*.db
-*.sqlite
-*.sqlite3
-
-# Installer output
-Installer/Output/
-
-# NuGet
-*.nupkg
-*.snupkg
-.nuget/
-
-# OS artifacts
-.DS_Store
+# Windows
 Thumbs.db
 Desktop.ini
-
-# IDE
-.idea/
-.vscode/
-*.code-workspace
-
-# Developer safety bypass flag (intentionally NOT committed)
-C:/dev_bypass_flag.txt

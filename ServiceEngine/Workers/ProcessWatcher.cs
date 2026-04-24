@@ -62,12 +62,13 @@ public sealed class ProcessWatcher : BackgroundService
             var executablePath = proc["ExecutablePath"]?.ToString() ?? "";
             var commandLine = proc["CommandLine"]?.ToString() ?? "";
 
-            _log.LogDebug("New process: {Name}", processName);
+            _log.LogInformation("New process: {Name}", processName);
 
             // Evaluate on thread pool to avoid blocking WMI callbacks
-            Task.Run(async () =>
+            SafeTask.Run(async () =>
             {
                 var decision = await _state.EvaluateAsync(processName, commandLine, null);
+                _log.LogInformation("Decision for {Name}: {Action}", processName, decision.Action);
 
                 switch (decision.Action)
                 {
@@ -87,7 +88,7 @@ public sealed class ProcessWatcher : BackgroundService
                     case EnforcementAction.Allow:
                         break;
                 }
-            });
+            }, _log, $"ProcessWatcher_Evaluate_{processName}");
         }
         catch (Exception ex)
         {

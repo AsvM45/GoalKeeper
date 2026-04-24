@@ -14,7 +14,7 @@ public sealed class AppDatabase
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "GoalKeeper", "metrics.sqlite");
 
-    private static string ConnStr => $"Data Source={DbPath};";
+    private static string ConnStr => $"Data Source={DbPath};Default Timeout=5;";
 
     // ── Dashboard stats ───────────────────────────────────────────────────────
 
@@ -46,6 +46,60 @@ public sealed class AppDatabase
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM PickupLog WHERE Date(Timestamp) = Date('now', 'localtime')";
         return Convert.ToInt32(await cmd.ExecuteScalarAsync());
+    }
+
+    public async Task<List<(string Date, int ProductiveSecs, int DistractingSecs)>> GetWeeklyTimeAsync()
+    {
+        await using var conn = new SqliteConnection(ConnStr);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT Date(Timestamp, 'localtime') as Dt, Category, SUM(DurationSeconds)
+            FROM ScreenTimeLog
+            WHERE Timestamp >= datetime('now', '-7 days', 'localtime')
+              AND Category IN ('productive', 'distracting')
+            GROUP BY Dt, Category
+            ORDER BY Dt ASC";
+        
+        var dict = new Dictionary<string, (int Prod, int Dist)>();
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+        {
+            var dt = r.GetString(0);
+            var cat = r.GetString(1);
+            var secs = r.GetInt32(2);
+            
+            if (!dict.ContainsKey(dt)) dict[dt] = (0, 0);
+            
+            var curr = dict[dt];
+            if (cat == "productive") dict[dt] = (curr.Prod + secs, curr.Dist);
+            else dict[dt] = (curr.Prod, curr.Dist + secs);
+        }
+        
+        return dict.Select(kvp => (kvp.Key, kvp.Value.Prod, kvp.Value.Dist)).ToList();
+    }
+
+    public async Task<List<(string AppName, int DurationSeconds)>> GetTopAppsTodayAsync(int limit)
+    {
+        await using var conn = new SqliteConnection(ConnStr);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT AppName, SUM(DurationSeconds) as TotalSecs
+            FROM ScreenTimeLog
+            WHERE Date(Timestamp) = Date('now', 'localtime')
+            GROUP BY AppName
+            ORDER BY TotalSecs DESC
+            LIMIT @limit";
+        cmd.Parameters.AddWithValue("@limit", limit);
+        
+        var list = new List<(string, int)>();
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+        {
+            list.Add((r.GetString(0), r.GetInt32(1)));
+        }
+        return list;
     }
 
     // ── System state ──────────────────────────────────────────────────────────

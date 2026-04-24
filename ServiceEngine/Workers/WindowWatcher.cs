@@ -23,6 +23,7 @@ public sealed class WindowWatcher : BackgroundService
     private string? _currentCategory;
     private DateTime _focusStart;
     private string _currentSessionId = Guid.NewGuid().ToString();
+    private readonly object _stateLock = new();
 
     private IntPtr _foregroundHook;
     private IntPtr _nameChangeHook;
@@ -98,22 +99,29 @@ public sealed class WindowWatcher : BackgroundService
         }
 
         // Flush time for the previous window
-        if (_currentApp != null)
+        string? prevApp, prevTitle, prevCategory;
+        lock (_stateLock)
+        {
+            prevApp = _currentApp;
+            prevTitle = _currentTitle;
+            prevCategory = _currentCategory;
+        }
+
+        if (prevApp != null)
         {
             int elapsed = (int)(DateTime.Now - _focusStart).TotalSeconds;
             if (elapsed > 0)
             {
-                _db.LogWindow(_currentApp, _currentTitle, _currentCategory, elapsed, _currentSessionId);
+                _db.LogWindow(prevApp, prevTitle, prevCategory, elapsed, _currentSessionId);
 
                 // Update budget used time asynchronously
-                if (_currentCategory != null)
-                    Task.Run(() => _db.AddUsedSecondsAsync(_currentCategory, elapsed));
+                if (prevCategory != null)
+                    SafeTask.Run(() => _db.AddUsedSecondsAsync(prevCategory, elapsed), _log, "WindowWatcher_AddUsedSeconds");
             }
         }
 
         // Detect pickup (context switch from productive to distracting)
-        var prevCategory = _currentCategory;
-        Task.Run(async () =>
+        SafeTask.Run(async () =>
         {
             string? newCategory = null;
             var domain = ExtractDomain(title);
@@ -122,16 +130,22 @@ public sealed class WindowWatcher : BackgroundService
             newCategory ??= await _db.GetCategoryForAppAsync(appName);
 
             if (prevCategory is "productive" or "neutral" && newCategory == "distracting")
-                await _db.LogPickupAsync(_currentApp, appName, newCategory);
+                await _db.LogPickupAsync(prevApp, appName, newCategory);
 
-            _currentCategory = newCategory;
+            lock (_stateLock)
+            {
+                _currentCategory = newCategory;
+            }
 
             // Evaluate the new window for enforcement
             await EvaluateAndEnforceAsync(appName, title, domain);
-        });
+        }, _log, "WindowWatcher_EvaluateNewFocus");
 
-        _currentApp = appName;
-        _currentTitle = title;
+        lock (_stateLock)
+        {
+            _currentApp = appName;
+            _currentTitle = title;
+        }
         _focusStart = DateTime.Now;
         _currentSessionId = Guid.NewGuid().ToString();
     }
@@ -141,7 +155,7 @@ public sealed class WindowWatcher : BackgroundService
         try
         {
             var decision = await _state.EvaluateAsync(appName, title, domain);
-            _log.LogDebug("{App}: {Action} – {Reason}", appName, decision.Action, decision.Reason);
+            _log.LogInformation("{App}: {Action} – {Reason}", appName, decision.Action, decision.Reason);
 
             switch (decision.Action)
             {
@@ -191,10 +205,11 @@ public sealed class WindowWatcher : BackgroundService
     {
         try
         {
-            var hwnd = GetForegroundWindow();
-            if (hwnd == IntPtr.Zero) return;
-            // Post WM_KEYDOWN for Ctrl+W to close the active tab
-            PostMessage(hwnd, WM_KEYDOWN, (IntPtr)VK_W, IntPtr.Zero);
+            // Use keybd_event to properly send Ctrl+W key combo (closes browser tab)
+            keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_W, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_W, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
         catch { /* best effort */ }
     }
@@ -253,7 +268,9 @@ public sealed class WindowWatcher : BackgroundService
     private const uint PM_REMOVE = 0x0001;
     private const int SW_MINIMIZE = 6;
     private const int WM_KEYDOWN = 0x0100;
-    private const int VK_W = 0x57;
+    private const byte VK_W = 0x57;
+    private const byte VK_CONTROL = 0x11;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
 
     [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(
         uint eventMin, uint eventMax, IntPtr hmodWinEventProc,
@@ -276,6 +293,9 @@ public sealed class WindowWatcher : BackgroundService
     [DllImport("user32.dll")] private static extern bool PostMessage(
         IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll")] private static extern void keybd_event(
+        byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
     [DllImport("user32.dll")] private static extern bool PeekMessage(
         out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
 
@@ -291,6 +311,7 @@ public sealed class WindowWatcher : BackgroundService
         public IntPtr wParam;
         public IntPtr lParam;
         public uint time;
-        public System.Drawing.Point pt;
+        public int ptX;
+        public int ptY;
     }
 }

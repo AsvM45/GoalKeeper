@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -8,7 +9,10 @@ namespace ConfigUI.Services;
 
 /// <summary>
 /// Named pipe client that connects to the ServiceEngine.
-/// Maintains a persistent connection and fires events when server pushes messages.
+/// Architecture: ReadLoopAsync is the ONLY reader. SendAsync writes a message
+/// then waits for the ReadLoop to deliver the response via TaskCompletionSource.
+/// FireAndForgetAsync just writes (server returns null for these).
+/// A write lock serializes all writes.
 /// </summary>
 public sealed class PipeClient : IDisposable
 {
@@ -18,29 +22,18 @@ public sealed class PipeClient : IDisposable
     private CancellationTokenSource? _cts;
     private bool _disposed;
 
+    // Serializes writes only (reads are always done by ReadLoopAsync)
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+    // When SendAsync is waiting for a response, ReadLoopAsync delivers it here
+    private TaskCompletionSource<PipeMessage?>? _pendingResponse;
+    private readonly object _pendingLock = new();
+
     // Events the UI can subscribe to
     public event Action<PipeMessage>? MessageReceived;
     public event Action<bool>? ConnectionChanged;
 
     public bool IsConnected => _pipe?.IsConnected == true;
-
-    // #region agent log
-    private static readonly string _logPath = Path.Combine(
-        @"C:\Users\asvat\OneDrive\Documents\GitHub\GoalKeeper\GoalKeeper", "debug-df88ca.log");
-    private static void DbgLog(string msg, string hyp, object? data = null)
-    {
-        try
-        {
-            var entry = JsonSerializer.Serialize(new
-            {
-                sessionId = "df88ca", timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                location = "PipeClient.cs", hypothesisId = hyp, message = msg, data
-            });
-            File.AppendAllText(_logPath, entry + "\n");
-        }
-        catch { }
-    }
-    // #endregion
 
     public async Task ConnectAsync()
     {
@@ -55,20 +48,16 @@ public sealed class PipeClient : IDisposable
                     PipeOptions.Asynchronous | PipeOptions.WriteThrough);
 
                 await _pipe.ConnectAsync(3000, _cts.Token);
-                // #region agent log
-                DbgLog("ConnectAsync succeeded", "B", new { attempt });
-                // #endregion
+                _pipe.ReadMode = PipeTransmissionMode.Message;
                 ConnectionChanged?.Invoke(true);
 
+                // ReadLoopAsync is the ONLY thing that reads from the pipe
                 _ = Task.Run(() => ReadLoopAsync(_cts.Token));
                 return;
             }
             catch (OperationCanceledException) { return; }
-            catch (Exception ex)
+            catch
             {
-                // #region agent log
-                DbgLog("ConnectAsync failed, retrying", "B", new { attempt, error = ex.Message });
-                // #endregion
                 await Task.Delay(3000);
                 _pipe?.Dispose();
                 _pipe = null;
@@ -76,6 +65,11 @@ public sealed class PipeClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// The ONLY reader on the pipe. Runs continuously.
+    /// If SendAsync is awaiting a response, delivers it via _pendingResponse.
+    /// Otherwise, raises MessageReceived for server-pushed broadcasts.
+    /// </summary>
     private async Task ReadLoopAsync(CancellationToken ct)
     {
         var buffer = new byte[65536];
@@ -87,81 +81,97 @@ public sealed class PipeClient : IDisposable
                 if (read == 0) break;
 
                 var json = Encoding.UTF8.GetString(buffer, 0, read);
-                // #region agent log
-                DbgLog("ReadLoopAsync received message", "A/C", new { type = PipeMessage.Deserialize(json)?.Type });
-                // #endregion
                 var msg = PipeMessage.Deserialize(json);
-                if (msg != null)
+                if (msg == null) continue;
+
+                // Check if SendAsync is waiting for a response
+                TaskCompletionSource<PipeMessage?>? pending;
+                lock (_pendingLock)
                 {
-                    Application.Current.Dispatcher.Invoke(() => MessageReceived?.Invoke(msg));
+                    pending = _pendingResponse;
+                    _pendingResponse = null;
+                }
+
+                if (pending != null)
+                {
+                    // Deliver this message as the response to SendAsync
+                    pending.TrySetResult(msg);
+                }
+                else
+                {
+                    // Server-pushed broadcast — deliver to subscribers
+                    Application.Current?.Dispatcher.Invoke(() => MessageReceived?.Invoke(msg));
                 }
             }
-            // #region agent log
-            DbgLog("ReadLoopAsync loop ended (read==0 or disconnected)", "A/C",
-                new { isConnected = _pipe?.IsConnected });
-            // #endregion
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // #region agent log
-            DbgLog("ReadLoopAsync exception — triggering reconnect", "A/C", new { error = ex.Message });
-            // #endregion
-            Application.Current.Dispatcher.Invoke(() => ConnectionChanged?.Invoke(false));
-            // Auto-reconnect
-            if (!_disposed)
-                _ = Task.Run(() => ConnectAsync());
+            // Fail any pending response
+            lock (_pendingLock)
+            {
+                _pendingResponse?.TrySetResult(null);
+                _pendingResponse = null;
+            }
         }
+
+        // Disconnected
+        Application.Current?.Dispatcher.Invoke(() => ConnectionChanged?.Invoke(false));
+        if (!_disposed)
+            _ = Task.Run(() => ConnectAsync());
     }
 
+    /// <summary>
+    /// Sends a message and waits for a synchronous response.
+    /// The ReadLoopAsync thread will deliver the response.
+    /// </summary>
     public async Task<PipeMessage?> SendAsync(PipeMessage message)
     {
         if (_pipe?.IsConnected != true) return null;
+
+        var tcs = new TaskCompletionSource<PipeMessage?>();
+        lock (_pendingLock) { _pendingResponse = tcs; }
+
+        await _writeLock.WaitAsync();
         try
         {
             var bytes = Encoding.UTF8.GetBytes(message.Serialize());
             await _pipe.WriteAsync(bytes);
             await _pipe.FlushAsync();
-
-            // Read the synchronous response (for request/response patterns)
-            var buffer = new byte[65536];
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            int read = await _pipe.ReadAsync(buffer, cts.Token);
-            if (read == 0) return null;
-            return PipeMessage.Deserialize(Encoding.UTF8.GetString(buffer, 0, read));
         }
-        catch { return null; }
+        catch
+        {
+            lock (_pendingLock) { _pendingResponse = null; }
+            return null;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+
+        // Wait up to 5 seconds for the ReadLoop to deliver the response
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        cts.Token.Register(() => tcs.TrySetResult(null));
+        return await tcs.Task;
     }
 
     /// <summary>
     /// Sends a message and does NOT wait for a response.
-    /// Use for config-write commands where the server returns null (no ACK).
-    /// Avoids the cancellation-on-timeout pattern that breaks the pipe handle on Windows.
+    /// Used for config-write commands where the server returns null.
     /// </summary>
     public async Task FireAndForgetAsync(PipeMessage message)
     {
-        // #region agent log
-        DbgLog("FireAndForgetAsync called", "D", new
-        {
-            msgType   = message.Type,
-            pipeNull  = _pipe == null,
-            isConnected = _pipe?.IsConnected
-        });
-        // #endregion
         if (_pipe?.IsConnected != true) return;
+        await _writeLock.WaitAsync();
         try
         {
             var bytes = Encoding.UTF8.GetBytes(message.Serialize());
             await _pipe.WriteAsync(bytes);
             await _pipe.FlushAsync();
-            // #region agent log
-            DbgLog("FireAndForgetAsync sent OK", "D", new { msgType = message.Type });
-            // #endregion
         }
-        catch (Exception ex)
+        catch { /* pipe broken — ReadLoop will trigger reconnect */ }
+        finally
         {
-            // #region agent log
-            DbgLog("FireAndForgetAsync write failed", "D", new { msgType = message.Type, error = ex.Message });
-            // #endregion
+            _writeLock.Release();
         }
     }
 
@@ -173,7 +183,7 @@ public sealed class PipeClient : IDisposable
     }
 }
 
-// ── Pipe message (mirrored from ServiceEngine, no shared project reference needed at runtime) ──
+// ── Pipe message (mirrored from ServiceEngine) ──
 
 public sealed class PipeMessage
 {
