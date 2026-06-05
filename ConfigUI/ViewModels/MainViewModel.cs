@@ -5,7 +5,11 @@ using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ConfigUI.Services;
+using LiveChartsCore;
+using LiveChartsCore.SkiaSharpView;
+using LiveChartsCore.SkiaSharpView.Painting;
 using MaterialDesignThemes.Wpf;
+using SkiaSharp;
 
 namespace ConfigUI.ViewModels;
 
@@ -170,28 +174,164 @@ public class PlaceholderPageViewModel
 
 public partial class DashboardPageViewModel : ObservableObject
 {
+    // ── Summary cards ─────────────────────────────────────────────────────────
     [ObservableProperty] private string _todayProductiveHours = "–";
     [ObservableProperty] private string _todayDistractingHours = "–";
     [ObservableProperty] private int _todayPickups;
     [ObservableProperty] private int _productivityScore;
 
-    public DashboardPageViewModel(MainViewModel parent) { _ = LoadStatsAsync(); }
+    // ── Weekly stacked bar chart ──────────────────────────────────────────────
+    [ObservableProperty] private ISeries[] _weeklySeries = Array.Empty<ISeries>();
+    [ObservableProperty] private Axis[] _weeklyXAxes = Array.Empty<Axis>();
+    [ObservableProperty] private Axis[] _weeklyYAxes = Array.Empty<Axis>();
+
+    // ── Productivity ring chart ───────────────────────────────────────────────
+    [ObservableProperty] private ISeries[] _ringSeries = Array.Empty<ISeries>();
+
+    // ── Top apps table ────────────────────────────────────────────────────────
+    public ObservableCollection<TopAppRow> TopApps { get; } = [];
+
+    private readonly DispatcherTimer _refreshTimer;
+
+    public DashboardPageViewModel(MainViewModel parent)
+    {
+        _ = LoadStatsAsync();
+
+        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+        _refreshTimer.Tick += (_, _) => _ = LoadStatsAsync();
+        _refreshTimer.Start();
+    }
 
     private async Task LoadStatsAsync()
     {
         try
         {
             var db = new AppDatabase();
+
+            // Summary cards
             var (prod, dist) = await db.GetTodayTimeAsync();
             var pickups = await db.GetTodayPickupsAsync();
 
-            TodayProductiveHours   = FormatTime(prod);
-            TodayDistractingHours  = FormatTime(dist);
-            TodayPickups           = pickups;
-            ProductivityScore      = (prod + dist) == 0 ? 0
-                                     : (int)(prod * 100.0 / (prod + dist));
+            TodayProductiveHours  = FormatTime(prod);
+            TodayDistractingHours = FormatTime(dist);
+            TodayPickups          = pickups;
+            ProductivityScore     = (prod + dist) == 0 ? 0 : (int)(prod * 100.0 / (prod + dist));
+
+            // Weekly chart
+            var weekly = await db.GetWeeklyTimeAsync();
+            BuildWeeklyChart(weekly);
+
+            // Ring chart
+            BuildRingChart(prod, dist);
+
+            // Top apps
+            var topApps = await db.GetTopAppsTodayAsync(10);
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                TopApps.Clear();
+                foreach (var (appName, secs) in topApps)
+                    TopApps.Add(new TopAppRow(appName, FormatTime(secs)));
+            });
         }
-        catch { /* DB not initialized yet – service not running */ }
+        catch { /* DB not yet initialized or service not running */ }
+    }
+
+    private void BuildWeeklyChart(List<(string Date, int ProductiveSecs, int DistractingSecs)> weekly)
+    {
+        var last7 = Enumerable.Range(0, 7)
+            .Select(i => DateTime.Today.AddDays(-6 + i))
+            .ToList();
+
+        var prodValues  = new double[7];
+        var distValues  = new double[7];
+        var labels      = new string[7];
+
+        for (int i = 0; i < 7; i++)
+        {
+            labels[i] = last7[i].ToString("ddd");
+            var dt = last7[i].ToString("yyyy-MM-dd");
+            var match = weekly.FirstOrDefault(d => d.Date == dt);
+            if (match != default)
+            {
+                prodValues[i] = Math.Round(match.ProductiveSecs  / 3600.0, 2);
+                distValues[i] = Math.Round(match.DistractingSecs / 3600.0, 2);
+            }
+        }
+
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            WeeklySeries = new ISeries[]
+            {
+                new StackedColumnSeries<double>
+                {
+                    Name   = "Productive",
+                    Values = prodValues,
+                    Fill   = new SolidColorPaint(new SKColor(0x4C, 0xAF, 0x50)),
+                    Stroke = null,
+                    MaxBarWidth = 40,
+                },
+                new StackedColumnSeries<double>
+                {
+                    Name   = "Distracting",
+                    Values = distValues,
+                    Fill   = new SolidColorPaint(new SKColor(0xF4, 0x43, 0x36)),
+                    Stroke = null,
+                    MaxBarWidth = 40,
+                },
+            };
+
+            WeeklyXAxes = new[]
+            {
+                new Axis
+                {
+                    Labels = labels,
+                    LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
+                    TextSize = 11,
+                    SeparatorsPaint = null,
+                }
+            };
+
+            WeeklyYAxes = new[]
+            {
+                new Axis
+                {
+                    LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
+                    TextSize = 11,
+                    SeparatorsPaint = new SolidColorPaint(new SKColor(0x33, 0x33, 0x33)),
+                    Labeler = v => $"{v:0.#}h",
+                }
+            };
+        });
+    }
+
+    private void BuildRingChart(int prodSecs, int distSecs)
+    {
+        double total = prodSecs + distSecs;
+        double prodPct  = total == 0 ? 50 : Math.Max(1, prodSecs  / total * 100);
+        double distPct  = total == 0 ? 50 : Math.Max(1, distSecs  / total * 100);
+
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            RingSeries = new ISeries[]
+            {
+                new PieSeries<double>
+                {
+                    Name        = "Productive",
+                    Values      = new[] { prodPct },
+                    Fill        = new SolidColorPaint(new SKColor(0x4C, 0xAF, 0x50)),
+                    InnerRadius = 60,
+                    MaxRadialColumnWidth = 28,
+                },
+                new PieSeries<double>
+                {
+                    Name        = "Distracting",
+                    Values      = new[] { distPct },
+                    Fill        = new SolidColorPaint(new SKColor(0xF4, 0x43, 0x36)),
+                    InnerRadius = 60,
+                    MaxRadialColumnWidth = 28,
+                },
+            };
+        });
     }
 
     private static string FormatTime(int seconds)
@@ -200,6 +340,8 @@ public partial class DashboardPageViewModel : ObservableObject
         return h > 0 ? $"{h}h {m}m" : m > 0 ? $"{m}m" : "0m";
     }
 }
+
+public record TopAppRow(string AppName, string TimeDisplay);
 
 public record NuclearModeOption(string Value, string DisplayName, string Description, string Icon);
 
@@ -274,6 +416,7 @@ public partial class CategoriesPageViewModel : ObservableObject
 
     public ObservableCollection<CategoryRuleItem> Rules { get; } = [];
 
+    [ObservableProperty] private int _editingRuleId = 0;
     [ObservableProperty] private string _newPattern  = "";
     [ObservableProperty] private string _newCategory = "distracting";
     [ObservableProperty] private string _newRuleType = "app";
@@ -306,16 +449,28 @@ public partial class CategoriesPageViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(NewPattern)) { Status = "Pattern cannot be empty."; return; }
         if (!App.Pipe.IsConnected) { Status = "Not connected to service — start ServiceEngine first."; return; }
-        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.AddCategoryRule, new
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.UpsertCategoryRule, new
         {
+            id       = EditingRuleId,
             pattern  = NewPattern.Trim(),
             category = NewCategory,
             ruleType = NewRuleType
         }));
         NewPattern = "";
-        Status = "Rule added.";
+        EditingRuleId = 0;
+        Status = "Rule saved.";
         await Task.Delay(200); // brief wait for service to commit before re-reading
         await LoadAsync();
+    }
+
+    [RelayCommand]
+    private void EditRule(CategoryRuleItem item)
+    {
+        EditingRuleId = item.Id;
+        NewPattern    = item.Pattern;
+        NewCategory   = item.Category;
+        NewRuleType   = item.RuleType;
+        Status        = "Editing rule...";
     }
 
     [RelayCommand]
@@ -386,6 +541,17 @@ public partial class BudgetsPageViewModel : ObservableObject
         Status = "Budget saved.";
         await Task.Delay(200);
         await LoadAsync();
+    }
+
+    [RelayCommand]
+    private void EditBudget(BudgetItem item)
+    {
+        NewCategory       = item.Category;
+        NewAllowedMinutes = item.AllowedMinutes;
+        NewMaxLaunches    = item.MaxLaunches;
+        NewSessionMinutes = item.SessionMinutes;
+        NewFrictionSecs   = item.FrictionSecs;
+        Status            = "Editing budget...";
     }
 
     [RelayCommand]

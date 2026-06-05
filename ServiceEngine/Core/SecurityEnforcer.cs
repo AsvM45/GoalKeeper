@@ -196,30 +196,41 @@ public sealed class SecurityEnforcer
                 return;
             }
 
-            // Build SID for Interactive Users
-            var sid = new SecurityIdentifier(WellKnownSidType.InteractiveSid, null);
-            byte[] sidBytes = new byte[sid.BinaryLength];
-            sid.GetBinaryForm(sidBytes, 0);
+            // Build SIDs for Interactive Users (S-1-5-4) and Everyone (S-1-1-0).
+            // Both are denied PROCESS_TERMINATE so neither Task Manager nor any user
+            // process can kill this service while Armed Mode is active.
+            var interactiveSid = new SecurityIdentifier(WellKnownSidType.InteractiveSid, null);
+            byte[] interactiveSidBytes = new byte[interactiveSid.BinaryLength];
+            interactiveSid.GetBinaryForm(interactiveSidBytes, 0);
 
-            // Calculate new DACL size: old used bytes + space for a new ACCESS_DENIED_ACE
-            // ACE header (4) + mask (4) + SID length
-            uint newAceSize = (uint)(8 + sidBytes.Length);
-            uint newDaclSize = aclInfo.AclBytesInUse + newAceSize;
+            var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            byte[] worldSidBytes = new byte[worldSid.BinaryLength];
+            worldSid.GetBinaryForm(worldSidBytes, 0);
+
+            // New DACL size: existing bytes + two ACCESS_DENIED ACEs (header=4, mask=4, SID)
+            uint aceSize1 = (uint)(8 + interactiveSidBytes.Length);
+            uint aceSize2 = (uint)(8 + worldSidBytes.Length);
+            uint newDaclSize = aclInfo.AclBytesInUse + aceSize1 + aceSize2;
 
             IntPtr pNewDacl = Marshal.AllocHGlobal((int)newDaclSize);
             try
             {
-                // Initialize the new ACL
                 if (!InitializeAcl(pNewDacl, newDaclSize, ACL_REVISION))
                 {
                     _log?.LogError("InitializeAcl failed. LastError={E}", Marshal.GetLastWin32Error());
                     return;
                 }
 
-                // Add our DENY ACE first (deny ACEs should precede allow ACEs)
-                if (!AddAccessDeniedAce(pNewDacl, ACL_REVISION, PROCESS_TERMINATE, sidBytes))
+                // Deny ACEs must precede Allow ACEs in a well-formed DACL.
+                if (!AddAccessDeniedAce(pNewDacl, ACL_REVISION, PROCESS_TERMINATE, interactiveSidBytes))
                 {
-                    _log?.LogError("AddAccessDeniedAce failed. LastError={E}", Marshal.GetLastWin32Error());
+                    _log?.LogError("AddAccessDeniedAce(Interactive) failed. LastError={E}", Marshal.GetLastWin32Error());
+                    return;
+                }
+
+                if (!AddAccessDeniedAce(pNewDacl, ACL_REVISION, PROCESS_TERMINATE, worldSidBytes))
+                {
+                    _log?.LogError("AddAccessDeniedAce(World) failed. LastError={E}", Marshal.GetLastWin32Error());
                     return;
                 }
 
@@ -227,10 +238,10 @@ public sealed class SecurityEnforcer
                 for (uint i = 0; i < aclInfo.AceCount; i++)
                 {
                     if (GetAce(pOldDacl, i, out IntPtr pAce))
-                        AddAce(pNewDacl, ACL_REVISION, 0xFFFFFFFF, pAce, (uint)Marshal.ReadInt16(pAce, 2)); // AceSize at offset 2
+                        AddAce(pNewDacl, ACL_REVISION, 0xFFFFFFFF, pAce, (uint)Marshal.ReadInt16(pAce, 2));
                 }
 
-                // Apply the new DACL to the process
+                // Apply the new DACL to the process handle
                 var setResult = SetSecurityInfo(
                     hProcess,
                     SE_OBJECT_TYPE.SE_KERNEL_OBJECT,
@@ -241,7 +252,7 @@ public sealed class SecurityEnforcer
                 if (setResult != 0)
                     _log?.LogError("SetSecurityInfo failed: {R}", setResult);
                 else
-                    _log?.LogInformation("DACL protection applied – Task Manager cannot terminate service.");
+                    _log?.LogInformation("DACL protection applied – Interactive+World denied PROCESS_TERMINATE.");
             }
             finally
             {
@@ -252,10 +263,120 @@ public sealed class SecurityEnforcer
                 LocalFree(pSD);
 
             CloseHandle(hProcess);
+
+            // Apply identical deny-write DACL to the usage database.
+            ApplyDaclToSqliteFile();
         }
         catch (Exception ex)
         {
             _log?.LogError(ex, "DACL protection failed (non-fatal in audit mode)");
+        }
+    }
+
+    /// <summary>
+    /// Restricts write access to metrics.sqlite so only the SYSTEM account can
+    /// modify it. Interactive users and Everyone are denied FILE write rights,
+    /// preventing manual tampering with the usage database.
+    /// </summary>
+    private void ApplyDaclToSqliteFile()
+    {
+        if (IsEmergencyStopActive()) return;
+
+        var dbPath = _db.DbPath;
+        if (!File.Exists(dbPath))
+        {
+            _log?.LogWarning("metrics.sqlite not found at {Path} – skipping file DACL.", dbPath);
+            return;
+        }
+
+        try
+        {
+            // Get current DACL for the file
+            var result = GetNamedSecurityInfo(
+                dbPath,
+                SE_OBJECT_TYPE.SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                IntPtr.Zero, IntPtr.Zero,
+                out IntPtr pOldDacl, IntPtr.Zero,
+                out IntPtr pSD);
+
+            if (result != 0)
+            {
+                _log?.LogError("GetNamedSecurityInfo for sqlite failed: {R}", result);
+                return;
+            }
+
+            if (!GetAclInformation(pOldDacl, out ACL_SIZE_INFORMATION aclInfo,
+                    (uint)Marshal.SizeOf<ACL_SIZE_INFORMATION>(), ACL_INFORMATION_CLASS.AclSizeInformation))
+            {
+                _log?.LogError("GetAclInformation(sqlite) failed. LastError={E}", Marshal.GetLastWin32Error());
+                return;
+            }
+
+            var interactiveSid = new SecurityIdentifier(WellKnownSidType.InteractiveSid, null);
+            byte[] interactiveSidBytes = new byte[interactiveSid.BinaryLength];
+            interactiveSid.GetBinaryForm(interactiveSidBytes, 0);
+
+            var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            byte[] worldSidBytes = new byte[worldSid.BinaryLength];
+            worldSid.GetBinaryForm(worldSidBytes, 0);
+
+            uint aceSize1 = (uint)(8 + interactiveSidBytes.Length);
+            uint aceSize2 = (uint)(8 + worldSidBytes.Length);
+            uint newDaclSize = aclInfo.AclBytesInUse + aceSize1 + aceSize2;
+
+            IntPtr pNewDacl = Marshal.AllocHGlobal((int)newDaclSize);
+            try
+            {
+                if (!InitializeAcl(pNewDacl, newDaclSize, ACL_REVISION))
+                {
+                    _log?.LogError("InitializeAcl(sqlite) failed. LastError={E}", Marshal.GetLastWin32Error());
+                    return;
+                }
+
+                // Deny write operations for Interactive and Everyone.
+                // SYSTEM's existing Allow ACEs are preserved below.
+                if (!AddAccessDeniedAce(pNewDacl, ACL_REVISION, FILE_WRITE_ACCESS, interactiveSidBytes))
+                {
+                    _log?.LogError("AddAccessDeniedAce(sqlite/Interactive) failed. LastError={E}", Marshal.GetLastWin32Error());
+                    return;
+                }
+
+                if (!AddAccessDeniedAce(pNewDacl, ACL_REVISION, FILE_WRITE_ACCESS, worldSidBytes))
+                {
+                    _log?.LogError("AddAccessDeniedAce(sqlite/World) failed. LastError={E}", Marshal.GetLastWin32Error());
+                    return;
+                }
+
+                for (uint i = 0; i < aclInfo.AceCount; i++)
+                {
+                    if (GetAce(pOldDacl, i, out IntPtr pAce))
+                        AddAce(pNewDacl, ACL_REVISION, 0xFFFFFFFF, pAce, (uint)Marshal.ReadInt16(pAce, 2));
+                }
+
+                var setResult = SetNamedSecurityInfo(
+                    dbPath,
+                    SE_OBJECT_TYPE.SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    IntPtr.Zero, IntPtr.Zero,
+                    pNewDacl, IntPtr.Zero);
+
+                if (setResult != 0)
+                    _log?.LogError("SetNamedSecurityInfo(sqlite) failed: {R}", setResult);
+                else
+                    _log?.LogInformation("sqlite DACL applied – writes restricted to SYSTEM only.");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(pNewDacl);
+            }
+
+            if (pSD != IntPtr.Zero)
+                LocalFree(pSD);
+        }
+        catch (Exception ex)
+        {
+            _log?.LogError(ex, "sqlite DACL protection failed (non-fatal)");
         }
     }
 
@@ -279,8 +400,10 @@ public sealed class SecurityEnforcer
     private const uint PROCESS_TERMINATE = 0x0001;
     private const uint DACL_SECURITY_INFORMATION = 0x00000004;
     private const uint ACL_REVISION = 2;
+    // FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER
+    private const uint FILE_WRITE_ACCESS = 0x00100116;
 
-    private enum SE_OBJECT_TYPE { SE_KERNEL_OBJECT = 6 }
+    private enum SE_OBJECT_TYPE { SE_KERNEL_OBJECT = 6, SE_FILE_OBJECT = 1 }
     private enum ACL_INFORMATION_CLASS { AclSizeInformation = 2 }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -299,6 +422,18 @@ public sealed class SecurityEnforcer
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr LocalFree(IntPtr hMem);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern uint GetNamedSecurityInfo(
+        string pObjectName, SE_OBJECT_TYPE objectType, uint secInfo,
+        IntPtr pSidOwner, IntPtr pSidGroup,
+        out IntPtr ppDacl, IntPtr ppSacl, out IntPtr ppSD);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern uint SetNamedSecurityInfo(
+        string pObjectName, SE_OBJECT_TYPE objectType, uint secInfo,
+        IntPtr pSidOwner, IntPtr pSidGroup,
+        IntPtr pDacl, IntPtr pSacl);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint GetSecurityInfo(

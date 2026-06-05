@@ -77,6 +77,11 @@ Filename: "{sys}\sc.exe"; \
     Parameters: "description {#ServiceName} ""GoalKeeper productivity enforcement service"""; \
     Flags: runhidden waituntilterminated
 
+; Configure auto-restart on crash: restart after 60 s (first failure), 120 s (second+)
+Filename: "{sys}\sc.exe"; \
+    Parameters: "failure {#ServiceName} reset= 0 actions= restart/60000/restart/120000/restart/120000"; \
+    Flags: runhidden waituntilterminated
+
 ; Start the service
 Filename: "{sys}\sc.exe"; \
     Parameters: "start {#ServiceName}"; \

@@ -248,13 +248,14 @@ public sealed class PipeServer : BackgroundService
                 return null;
             }
 
-            case MessageType.AddCategoryRule:
+            case MessageType.UpsertCategoryRule:
             {
+                var id       = msg.GetInt("id");
                 var pattern  = msg.GetString("pattern")  ?? "";
                 var category = msg.GetString("category") ?? "";
                 var ruleType = msg.GetString("ruleType") ?? "app";
                 if (!string.IsNullOrEmpty(pattern) && !string.IsNullOrEmpty(category))
-                    await _db.AddCategoryRuleAsync(pattern, category, ruleType);
+                    await _db.UpsertCategoryRuleAsync(id > 0 ? id : null, pattern, category, ruleType);
                 return null;
             }
 

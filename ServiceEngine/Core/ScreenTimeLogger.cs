@@ -1,16 +1,31 @@
 using Microsoft.Data.Sqlite;
+using Polly;
+using Polly.Retry;
 
 namespace ServiceEngine.Core;
 
 /// <summary>
 /// Thread-safe SQLite writer. Applies the schema on first run,
 /// handles daily budget resets, and exposes query helpers used by StateManager.
+/// Polly retry handles SQLITE_BUSY (error code 5) from cross-process ConfigUI reads.
 /// </summary>
 public sealed class ScreenTimeLogger : IDisposable
 {
     private readonly string _dbPath;
     private readonly string _connectionString;
     private readonly SemaphoreSlim _lock = new(1, 1);
+
+    // Shared retry pipeline: retries up to 3 times on SQLite BUSY (cross-process contention).
+    // Backoff: 50 ms → 150 ms → 450 ms (exponential).
+    private static readonly ResiliencePipeline _sqliteRetry = new ResiliencePipelineBuilder()
+        .AddRetry(new RetryStrategyOptions
+        {
+            ShouldHandle = new PredicateBuilder().Handle<SqliteException>(ex => ex.SqliteErrorCode == 5),
+            MaxRetryAttempts = 3,
+            Delay = TimeSpan.FromMilliseconds(50),
+            BackoffType = DelayBackoffType.Exponential,
+        })
+        .Build();
 
     // In-memory write buffer for ScreenTimeLog rows
     private readonly List<ScreenTimeEntry> _buffer = new();
@@ -26,30 +41,27 @@ public sealed class ScreenTimeLogger : IDisposable
         {
             var appData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             var dir = Path.Combine(appData, "GoalKeeper");
-            
+            _dbPath = Path.Combine(dir, "metrics.sqlite");
+
             if (!Directory.Exists(dir))
-        {
-            Directory.CreateDirectory(dir);
-            try
             {
-                var dInfo = new DirectoryInfo(dir);
-                var sec = dInfo.GetAccessControl();
-                sec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
-                    new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
-                    System.Security.AccessControl.FileSystemRights.FullControl,
-                    System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
-                    System.Security.AccessControl.PropagationFlags.None,
-                    System.Security.AccessControl.AccessControlType.Allow));
-                dInfo.SetAccessControl(sec);
+                Directory.CreateDirectory(dir);
+                try
+                {
+                    var dInfo = new DirectoryInfo(dir);
+                    var sec = dInfo.GetAccessControl();
+                    sec.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                        new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
+                        System.Security.AccessControl.FileSystemRights.FullControl,
+                        System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                        System.Security.AccessControl.PropagationFlags.None,
+                        System.Security.AccessControl.AccessControlType.Allow));
+                    dInfo.SetAccessControl(sec);
+                }
+                catch { /* Best effort */ }
             }
-            catch { /* Best effort */ }
         }
 
-        }
-        if (testDbPath == null)
-        {
-            _dbPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GoalKeeper", "metrics.sqlite");
-        }
         // Enable a 5-second automatic busy timeout to handle ConfigUI concurrent locks
         _connectionString = $"Data Source={_dbPath};Default Timeout=5;";
 
@@ -105,22 +117,26 @@ public sealed class ScreenTimeLogger : IDisposable
         await _lock.WaitAsync();
         try
         {
-            await using var conn = new SqliteConnection(_connectionString);
-            await conn.OpenAsync();
-            await using var tx = await conn.BeginTransactionAsync();
-            foreach (var e in snapshot)
+            await _sqliteRetry.ExecuteAsync(async _ =>
             {
-                await using var cmd = new SqliteCommand(
-                    @"INSERT INTO ScreenTimeLog (AppName, WindowTitle, Category, DurationSeconds, SessionId)
-                      VALUES (@app, @title, @cat, @dur, @sid)", conn);
-                cmd.Parameters.AddWithValue("@app", e.AppName);
-                cmd.Parameters.AddWithValue("@title", e.WindowTitle ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("@cat", e.Category ?? (object)DBNull.Value);
-                cmd.Parameters.AddWithValue("@dur", e.DurationSeconds);
-                cmd.Parameters.AddWithValue("@sid", e.SessionId);
-                await cmd.ExecuteNonQueryAsync();
-            }
-            await tx.CommitAsync();
+                await using var conn = new SqliteConnection(_connectionString);
+                await conn.OpenAsync();
+                await using var tx = await conn.BeginTransactionAsync();
+                foreach (var e in snapshot)
+                {
+                    await using var cmd = new SqliteCommand(
+                        @"INSERT INTO ScreenTimeLog (AppName, WindowTitle, Category, DurationSeconds, SessionId)
+                          VALUES (@app, @title, @cat, @dur, @sid)", conn);
+                    cmd.Transaction = (SqliteTransaction)tx;
+                    cmd.Parameters.AddWithValue("@app", e.AppName);
+                    cmd.Parameters.AddWithValue("@title", e.WindowTitle ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@cat", e.Category ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@dur", e.DurationSeconds);
+                    cmd.Parameters.AddWithValue("@sid", e.SessionId);
+                    await cmd.ExecuteNonQueryAsync();
+                }
+                await tx.CommitAsync();
+            }, CancellationToken.None);
         }
         finally
         {
@@ -282,19 +298,30 @@ public sealed class ScreenTimeLogger : IDisposable
 
     // ── Category Rule CRUD ────────────────────────────────────────────────────
 
-    public async Task AddCategoryRuleAsync(string pattern, string category, string ruleType)
+    public async Task UpsertCategoryRuleAsync(int? id, string pattern, string category, string ruleType)
     {
         await _lock.WaitAsync();
         try
         {
             await using var conn = new SqliteConnection(_connectionString);
             await conn.OpenAsync();
-            await using var cmd = new SqliteCommand(
-                "INSERT INTO CategoryRules (Pattern, Category, RuleType) VALUES (@p, @c, @t)", conn);
+            SqliteCommand cmd;
+            if (id > 0)
+            {
+                cmd = new SqliteCommand(
+                    "UPDATE CategoryRules SET Pattern = @p, Category = @c, RuleType = @t WHERE Id = @id", conn);
+                cmd.Parameters.AddWithValue("@id", id.Value);
+            }
+            else
+            {
+                cmd = new SqliteCommand(
+                    "INSERT INTO CategoryRules (Pattern, Category, RuleType) VALUES (@p, @c, @t)", conn);
+            }
             cmd.Parameters.AddWithValue("@p", pattern);
             cmd.Parameters.AddWithValue("@c", category);
             cmd.Parameters.AddWithValue("@t", ruleType);
             await cmd.ExecuteNonQueryAsync();
+            await cmd.DisposeAsync();
         }
         finally { _lock.Release(); }
     }
@@ -325,8 +352,8 @@ public sealed class ScreenTimeLogger : IDisposable
             await using var conn = new SqliteConnection(_connectionString);
             await conn.OpenAsync();
             await using var cmd = new SqliteCommand(@"
-                INSERT INTO Budgets (Category, AllowedSeconds, MaxLaunches, SessionMinutes, FrictionSeconds)
-                VALUES (@cat, @allowed, @launches, @session, @friction)
+                INSERT INTO Budgets (Category, AllowedSeconds, MaxLaunches, SessionMinutes, FrictionSeconds, LastResetDate)
+                VALUES (@cat, @allowed, @launches, @session, @friction, Date('now', 'localtime'))
                 ON CONFLICT(Category) DO UPDATE SET
                     AllowedSeconds  = @allowed,
                     MaxLaunches     = @launches,
@@ -373,21 +400,24 @@ public sealed class ScreenTimeLogger : IDisposable
         await _lock.WaitAsync();
         try
         {
-            await using var conn = new SqliteConnection(_connectionString);
-            await conn.OpenAsync();
-            await using var cmd = new SqliteCommand(
-                "SELECT Pattern, Category FROM CategoryRules WHERE RuleType = @type", conn);
-            cmd.Parameters.AddWithValue("@type", ruleType);
-            await using var reader = await cmd.ExecuteReaderAsync();
-
-            while (await reader.ReadAsync())
+            return await _sqliteRetry.ExecuteAsync(async _ =>
             {
-                var pattern = reader.GetString(0);
-                var category = reader.GetString(1);
-                if (MatchesWildcard(value, pattern))
-                    return category;
-            }
-            return null;
+                await using var conn = new SqliteConnection(_connectionString);
+                await conn.OpenAsync();
+                await using var cmd = new SqliteCommand(
+                    "SELECT Pattern, Category FROM CategoryRules WHERE RuleType = @type", conn);
+                cmd.Parameters.AddWithValue("@type", ruleType);
+                await using var reader = await cmd.ExecuteReaderAsync();
+
+                while (await reader.ReadAsync())
+                {
+                    var pattern = reader.GetString(0);
+                    var category = reader.GetString(1);
+                    if (MatchesWildcard(value, pattern))
+                        return category;
+                }
+                return (string?)null;
+            }, CancellationToken.None);
         }
         finally
         {

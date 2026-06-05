@@ -28,6 +28,7 @@ public static class MessageType
 
     // Config writes (routed through service so it has admin write rights to the DB)
     public const string SetState           = "SET_STATE";
+    public const string UpsertCategoryRule = "UPSERT_CATEGORY_RULE";
     public const string AddCategoryRule    = "ADD_CATEGORY_RULE";
     public const string DeleteCategoryRule = "DELETE_CATEGORY_RULE";
     public const string UpsertBudget       = "UPSERT_BUDGET";

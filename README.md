@@ -3,6 +3,10 @@
 > Apple Screen Time + ScreenZen + StayFocusd, merged into one tamper-proof Windows app.
 
 [![Build and Release](https://github.com/yourusername/GoalKeeper/actions/workflows/build-and-release.yml/badge.svg)](https://github.com/yourusername/GoalKeeper/actions)
+[![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen)](GoalKeeper/ServiceEngine.Tests)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-informational)](https://github.com/yourusername/GoalKeeper)
+[![.NET](https://img.shields.io/badge/.NET-8.0-purple)](https://dotnet.microsoft.com/download/dotnet/8.0)
 
 ---
 
@@ -142,13 +146,13 @@ cd ConfigUI
 dotnet run
 ```
 
-### Testing on a VM
+### Testing
 
-**Always test Armed Mode in a VM with snapshots.** See [docs/VM_SETUP.md](docs/VM_SETUP.md) for:
-- Hyper-V setup (free, Windows 10/11 Pro)
-- VirtualBox setup (free, works on Home)
-- Snapshot strategy
-- Full testing protocol
+**Always test Armed Mode in a VM with snapshots.**
+
+- **[docs/TESTING_PROTOCOL.md](docs/TESTING_PROTOCOL.md)** — Complete 4-phase testing protocol (build gate → audit mode → armed mode → safe mode recovery)
+- **[docs/VM_SETUP.md](docs/VM_SETUP.md)** — Hyper-V and VirtualBox setup guide
+- **[scripts/preflight-safety-check.ps1](scripts/preflight-safety-check.ps1)** — Automated pre-flight check that detects VM, bypass flag, and service state
 
 ---
 

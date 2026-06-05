@@ -35,11 +35,12 @@ internal sealed class Program
             bool devMode = File.Exists(DevBypassFlag);
 
             var builder = Host.CreateApplicationBuilder(args);
-            builder.Services.AddSerilog(Log.Logger);
-            builder.Services.AddWindowsService(options =>
-            {
-                options.ServiceName = "GoalKeeperService";
-            });
+        builder.Services.AddSerilog(Log.Logger);
+        builder.Services.AddMemoryCache();
+        builder.Services.AddWindowsService(options =>
+        {
+            options.ServiceName = "GoalKeeperService";
+        });
 
         // ── Register core services ─────────────────────────────────────────────
         builder.Services.AddSingleton<ScreenTimeLogger>();

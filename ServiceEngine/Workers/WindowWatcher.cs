@@ -45,40 +45,52 @@ public sealed class WindowWatcher : BackgroundService
     {
         _log.LogInformation("WindowWatcher starting.");
 
-        _delegateRef = OnWinEvent;
-        _foregroundHook = SetWinEventHook(
-            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
-            IntPtr.Zero, _delegateRef,
-            0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-
-        _nameChangeHook = SetWinEventHook(
-            EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
-            IntPtr.Zero, _delegateRef,
-            0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-
-        if (_foregroundHook == IntPtr.Zero)
-            _log.LogError("Failed to install foreground hook. Error: {E}", Marshal.GetLastWin32Error());
-
-        // Run a Win32 message pump so the hooks fire
-        try
+        var tcs = new TaskCompletionSource();
+        var thread = new Thread(() =>
         {
-            while (!stoppingToken.IsCancellationRequested)
+            _delegateRef = OnWinEvent;
+            _foregroundHook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                IntPtr.Zero, _delegateRef,
+                0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+            _nameChangeHook = SetWinEventHook(
+                EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE,
+                IntPtr.Zero, _delegateRef,
+                0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+            if (_foregroundHook == IntPtr.Zero)
+                _log.LogError("Failed to install foreground hook. Error: {E}", Marshal.GetLastWin32Error());
+
+            try
             {
-                while (PeekMessage(out var msg, IntPtr.Zero, 0, 0, PM_REMOVE))
+                // Synchronous message pump - crucial for WinEventHook on Windows
+                while (!stoppingToken.IsCancellationRequested)
                 {
-                    TranslateMessage(ref msg);
-                    DispatchMessage(ref msg);
+                    // Sleep efficiently until a message arrives (up to 500ms)
+                    MsgWaitForMultipleObjects(0, null, false, 500, QS_ALLEVENTS);
+                    
+                    while (PeekMessage(out var msg, IntPtr.Zero, 0, 0, PM_REMOVE))
+                    {
+                        TranslateMessage(ref msg);
+                        DispatchMessage(ref msg);
+                    }
                 }
-                await Task.Delay(50, stoppingToken);
             }
-        }
-        catch (OperationCanceledException) { }
-        finally
-        {
-            if (_foregroundHook != IntPtr.Zero) UnhookWinEvent(_foregroundHook);
-            if (_nameChangeHook != IntPtr.Zero) UnhookWinEvent(_nameChangeHook);
-            _log.LogInformation("WindowWatcher stopped.");
-        }
+            finally
+            {
+                if (_foregroundHook != IntPtr.Zero) UnhookWinEvent(_foregroundHook);
+                if (_nameChangeHook != IntPtr.Zero) UnhookWinEvent(_nameChangeHook);
+                _log.LogInformation("WindowWatcher stopped.");
+                tcs.SetResult();
+            }
+        });
+
+        thread.IsBackground = true;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+
+        await tcs.Task;
     }
 
     private void OnWinEvent(IntPtr hWinEventHook, uint eventType,
@@ -91,11 +103,17 @@ public sealed class WindowWatcher : BackgroundService
 
         if (string.IsNullOrEmpty(appName)) return;
 
-        // For EVENT_OBJECT_NAMECHANGE, only care about browser tabs (title changes in foreground)
+        // For EVENT_OBJECT_NAMECHANGE, only care about top-level HWND title changes.
+        // Filter out menus (OBJID_MENU), list items, status-bar parts, IME composition windows, etc.
+        // idObject == OBJID_WINDOW (0) means the event targets the window itself.
+        // idChild  == CHILDID_SELF  (0) means it's the object, not one of its children.
+        // GetParent == Zero ensures it is a top-level window, not an owned/child HWND.
         if (eventType == EVENT_OBJECT_NAMECHANGE)
         {
-            if (appName != _currentApp) return; // Not foreground
-            if (title == _currentTitle) return;  // No real change
+            if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
+            if (GetParent(hwnd) != IntPtr.Zero) return;
+            if (appName != _currentApp) return; // Not foreground browser
+            if (title == _currentTitle) return;  // Title unchanged
         }
 
         // Flush time for the previous window
@@ -267,10 +285,16 @@ public sealed class WindowWatcher : BackgroundService
     private const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
     private const uint PM_REMOVE = 0x0001;
     private const int SW_MINIMIZE = 6;
+    private const int OBJID_WINDOW = 0;   // Event targets the window itself
+    private const int CHILDID_SELF = 0;   // Not a child element
     private const int WM_KEYDOWN = 0x0100;
     private const byte VK_W = 0x57;
     private const byte VK_CONTROL = 0x11;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+
+    private const uint QS_ALLEVENTS = 0x04BF;
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint MsgWaitForMultipleObjects(uint nCount, IntPtr[]? pHandles, bool bWaitAll, uint dwMilliseconds, uint dwWakeMask);
 
     [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(
         uint eventMin, uint eventMax, IntPtr hmodWinEventProc,
@@ -289,6 +313,8 @@ public sealed class WindowWatcher : BackgroundService
     [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr hWnd);
 
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hWnd);
 
     [DllImport("user32.dll")] private static extern bool PostMessage(
         IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);

@@ -4,6 +4,7 @@
              xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
              xmlns:md="http://materialdesigninxaml.net/winfx/xaml/themes"
              xmlns:vm="clr-namespace:ConfigUI.ViewModels"
+             xmlns:lvc="clr-namespace:LiveChartsCore.SkiaSharpView.WPF;assembly=LiveChartsCore.SkiaSharpView.WPF"
              StartupUri="Views/MainWindow.xaml">
     <Application.Resources>
         <ResourceDictionary>
@@ -52,8 +53,50 @@
                                 </StackPanel>
                             </materialDesign:Card>
                         </WrapPanel>
-                        <TextBlock Text="Detailed charts and per-app breakdowns coming soon."
-                                   Opacity="0.4" FontSize="13" Margin="0,8,0,0"/>
+                        <!-- Weekly activity chart -->
+                        <TextBlock Text="Weekly Activity (hours)" FontSize="14" FontWeight="Medium" Margin="0,24,0,8"/>
+                        <Border Height="180" CornerRadius="6" Background="#0CFFFFFF" Padding="8">
+                            <lvc:CartesianChart Series="{Binding WeeklySeries}"
+                                               XAxes="{Binding WeeklyXAxes}"
+                                               YAxes="{Binding WeeklyYAxes}"
+                                               AnimationsSpeed="0:0:0.3"/>
+                        </Border>
+
+                        <!-- Productivity ring + top apps side by side -->
+                        <Grid Margin="0,20,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="200"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Ring chart -->
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="Today's Split" FontSize="14" FontWeight="Medium" Margin="0,0,0,8"/>
+                                <lvc:PieChart Series="{Binding RingSeries}"
+                                             Height="160"
+                                             InitialRotation="-90"
+                                             LegendPosition="Hidden"
+                                             AnimationsSpeed="0:0:0.3"/>
+                            </StackPanel>
+
+                            <!-- Top apps table -->
+                            <StackPanel Grid.Column="1" Margin="20,0,0,0">
+                                <TextBlock Text="Top Apps Today" FontSize="14" FontWeight="Medium" Margin="0,0,0,8"/>
+                                <DataGrid ItemsSource="{Binding TopApps}"
+                                         AutoGenerateColumns="False"
+                                         IsReadOnly="True"
+                                         HeadersVisibility="Column"
+                                         CanUserResizeRows="False"
+                                         GridLinesVisibility="Horizontal"
+                                         MaxHeight="160"
+                                         FontSize="12">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="App" Binding="{Binding AppName}" Width="*"/>
+                                        <DataGridTextColumn Header="Time" Binding="{Binding TimeDisplay}" Width="70"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </StackPanel>
+                        </Grid>
                     </StackPanel>
                 </ScrollViewer>
             </DataTemplate>
@@ -230,15 +273,22 @@
                                 <DataGridTextColumn Header="Pattern"  Binding="{Binding Pattern}"  Width="*"/>
                                 <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="140"/>
                                 <DataGridTextColumn Header="Match on" Binding="{Binding RuleType}" Width="120"/>
-                                <DataGridTemplateColumn Width="80">
+                                <DataGridTemplateColumn Width="130">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
-                                            <Button Content="Delete" FontSize="11"
-                                                    CommandParameter="{Binding}"
-                                                    Command="{Binding DataContext.DeleteRuleCommand,
-                                                              RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                                                    Style="{StaticResource MaterialDesignFlatButton}"
-                                                    Foreground="#F44336"/>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button Content="Edit" FontSize="11" Margin="0,0,8,0"
+                                                        CommandParameter="{Binding}"
+                                                        Command="{Binding DataContext.EditRuleCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                        Style="{StaticResource MaterialDesignFlatButton}"/>
+                                                <Button Content="Delete" FontSize="11"
+                                                        CommandParameter="{Binding}"
+                                                        Command="{Binding DataContext.DeleteRuleCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                        Style="{StaticResource MaterialDesignFlatButton}"
+                                                        Foreground="#F44336"/>
+                                            </StackPanel>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
@@ -313,15 +363,22 @@
                                 <DataGridTextColumn Header="Opens used"     Binding="{Binding UsedLaunches}"   Width="90"/>
                                 <DataGridTextColumn Header="Session (min)"  Binding="{Binding SessionMinutes}" Width="100"/>
                                 <DataGridTextColumn Header="Friction (sec)" Binding="{Binding FrictionSecs}"   Width="100"/>
-                                <DataGridTemplateColumn Width="80">
+                                <DataGridTemplateColumn Width="130">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
-                                            <Button Content="Delete" FontSize="11"
-                                                    CommandParameter="{Binding}"
-                                                    Command="{Binding DataContext.DeleteBudgetCommand,
-                                                              RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                                                    Style="{StaticResource MaterialDesignFlatButton}"
-                                                    Foreground="#F44336"/>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button Content="Edit" FontSize="11" Margin="0,0,8,0"
+                                                        CommandParameter="{Binding}"
+                                                        Command="{Binding DataContext.EditBudgetCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                        Style="{StaticResource MaterialDesignFlatButton}"/>
+                                                <Button Content="Delete" FontSize="11"
+                                                        CommandParameter="{Binding}"
+                                                        Command="{Binding DataContext.DeleteBudgetCommand,
+                                                                  RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                        Style="{StaticResource MaterialDesignFlatButton}"
+                                                        Foreground="#F44336"/>
+                                            </StackPanel>
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>
