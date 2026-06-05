@@ -6,20 +6,30 @@ using System.Windows.Input;
 namespace ConfigUI.Views;
 
 /// <summary>
-/// Forces the user to type a long, exact paragraph without backspace or typos.
-/// On success, generates a one-time HMAC token that the ServiceEngine validates.
+/// Forces the user to type a 250-word paragraph without copy-paste, backspace, or typos.
+/// On success, generates a one-time token that the ServiceEngine validates.
 /// </summary>
 public partial class TypingChallenge : Window
 {
-    // The paragraph the user must type. Deliberately complex and long.
-    private static readonly string[] Paragraphs =
+    private const int RequiredWordCount = 250;
+
+    private static readonly string[] WordPool =
     [
-        "I am making a deliberate choice to change my settings. I understand that this system is designed to protect me from impulsive decisions. I accept full responsibility for this modification and confirm that I am not acting under pressure or distraction. My goal is to improve my productivity and focus.",
-        "Focused work requires protecting deep attention from constant interruption. By choosing to adjust these settings, I acknowledge that short-term discomfort often precedes meaningful long-term results. I commit to using this freedom wisely and returning to focused work immediately after.",
-        "The purpose of friction is not to punish, but to create space between impulse and action. I have waited, I have thought, and I have decided. This change is intentional, measured, and aligned with my genuine goals. I accept accountability for what I choose to do next."
+        "deliberate", "choice", "settings", "protect", "impulsive", "decisions",
+        "responsibility", "modification", "pressure", "distraction", "productivity",
+        "focus", "attention", "commitment", "accountability", "intentional",
+        "measured", "aligned", "goals", "friction", "purpose", "punish",
+        "impulse", "action", "waited", "thought", "decided", "change",
+        "wisdom", "returning", "work", "immediately", "deep", "interruption",
+        "discomfort", "results", "long-term", "short-term", "meaningful",
+        "protecting", "constant", "choosing", "adjust", "acknowledge",
+        "0rganize", "c0mmit", "f0cus", "pr0ductive", "resp0nsible",
+        "dec1de", "1ntentional", "a11ow", "b1ock", "c0ntinue",
+        "Oxygen", "Omit", "0ffset", "Olive", "1etter", "1evel",
     ];
 
     private readonly string _targetParagraph;
+    private int _typedIndex;
     private bool _completed;
 
     public string? CompletionToken { get; private set; }
@@ -28,53 +38,96 @@ public partial class TypingChallenge : Window
     public TypingChallenge()
     {
         InitializeComponent();
-
-        var rng = new Random();
-        _targetParagraph = Paragraphs[rng.Next(Paragraphs.Length)];
+        _targetParagraph = GenerateChallengeText();
         TargetText.Text = _targetParagraph;
         ProgressBar.Maximum = _targetParagraph.Length;
     }
 
+    private static string GenerateChallengeText()
+    {
+        var rng = new Random();
+        var words = new List<string>(RequiredWordCount);
+        while (words.Count < RequiredWordCount)
+            words.Add(WordPool[rng.Next(WordPool.Length)]);
+
+        var sb = new StringBuilder();
+        for (int i = 0; i < words.Count; i++)
+        {
+            if (i > 0) sb.Append(' ');
+            sb.Append(words[i]);
+            if ((i + 1) % 20 == 0 && i < words.Count - 1)
+                sb.Append('.').Append(' ');
+        }
+        sb.Append('.');
+        return sb.ToString();
+    }
+
     private void InputBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        // Any backspace or delete = complete reset
         if (e.Key == Key.Back || e.Key == Key.Delete)
         {
             e.Handled = true;
-            ResetInput("Backspace detected – start over.");
+            ResetChallenge("Backspace or Delete detected — start over.");
+            return;
         }
+
+        if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            e.Handled = true;
+            ResetChallenge("Paste blocked — type manually.");
+            return;
+        }
+
+        if (e.Key == Key.C && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.X && Keyboard.Modifiers == ModifierKeys.Control)
+            e.Handled = true;
     }
 
     private void InputBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
         var typed = InputBox.Text;
-        var target = _targetParagraph;
 
-        // Check if typed so far matches the beginning of the target
-        if (!target.StartsWith(typed, StringComparison.Ordinal) && typed.Length > 0)
+        if (typed.Length < _typedIndex)
         {
-            ResetInput("Typo detected – start over.");
+            ResetChallenge("Editing detected — start over.");
             return;
         }
 
-        ProgressBar.Value = typed.Length;
+        for (int i = _typedIndex; i < typed.Length; i++)
+        {
+            if (i >= _targetParagraph.Length || typed[i] != _targetParagraph[i])
+            {
+                ResetChallenge("Typo detected — start over.");
+                return;
+            }
+        }
 
-        if (typed == target)
+        _typedIndex = typed.Length;
+        ProgressBar.Value = _typedIndex;
+
+        if (_typedIndex == _targetParagraph.Length)
         {
             ConfirmButton.IsEnabled = true;
             InputBox.IsReadOnly = true;
         }
     }
 
-    private void ResetInput(string reason)
+    private void ResetChallenge(string reason)
     {
+        _typedIndex = 0;
         InputBox.TextChanged -= InputBox_TextChanged;
         InputBox.Text = "";
         InputBox.TextChanged += InputBox_TextChanged;
         ProgressBar.Value = 0;
         ConfirmButton.IsEnabled = false;
+        InputBox.IsReadOnly = false;
+        InputBox.Focus();
 
-        // Flash the border red briefly to indicate reset
         InputBox.BorderBrush = System.Windows.Media.Brushes.Red;
         var timer = new System.Windows.Threading.DispatcherTimer
             { Interval = TimeSpan.FromMilliseconds(600) };
@@ -88,13 +141,9 @@ public partial class TypingChallenge : Window
 
     private async void ConfirmButton_Click(object sender, RoutedEventArgs e)
     {
-        // Generate one-time HMAC token
         var token = GenerateToken();
         CompletionToken = token;
-
-        // Register token with service
         await App.Pipe.SendAsync(Services.PipeMessage.Create("STORE_TOKEN", new { token }));
-
         _completed = true;
         DialogResult = true;
         Close();

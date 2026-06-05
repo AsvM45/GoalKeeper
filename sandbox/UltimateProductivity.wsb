@@ -1,0 +1,14 @@
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Enable</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\asvat\OneDrive\Documents\GitHub\GoalKeeper\GoalKeeper</HostFolder>
+      <SandboxFolder>C:\GoalKeeper</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\GoalKeeper\sandbox\bootstrap_sandbox.ps1</Command>
+  </LogonCommand>
+</Configuration>

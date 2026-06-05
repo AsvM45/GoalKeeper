@@ -179,11 +179,25 @@ public partial class DashboardPageViewModel : ObservableObject
     [ObservableProperty] private string _todayDistractingHours = "–";
     [ObservableProperty] private int _todayPickups;
     [ObservableProperty] private int _productivityScore;
+    [ObservableProperty] private int _activeHaloZones;
 
-    // ── Weekly stacked bar chart ──────────────────────────────────────────────
+    // ── Pillar 1: App & Website Activity ──────────────────────────────────────
     [ObservableProperty] private ISeries[] _weeklySeries = Array.Empty<ISeries>();
     [ObservableProperty] private Axis[] _weeklyXAxes = Array.Empty<Axis>();
     [ObservableProperty] private Axis[] _weeklyYAxes = Array.Empty<Axis>();
+    [ObservableProperty] private ISeries[] _hourlyActivitySeries = Array.Empty<ISeries>();
+    [ObservableProperty] private Axis[] _hourlyActivityXAxes = Array.Empty<Axis>();
+    [ObservableProperty] private Axis[] _hourlyActivityYAxes = Array.Empty<Axis>();
+
+    // ── Pillar 2: Notifications (context-switch frequency) ────────────────────
+    [ObservableProperty] private ISeries[] _notificationSeries = Array.Empty<ISeries>();
+    [ObservableProperty] private Axis[] _notificationXAxes = Array.Empty<Axis>();
+    [ObservableProperty] private Axis[] _notificationYAxes = Array.Empty<Axis>();
+
+    // ── Pillar 3: Pickups (first-look triggers) ───────────────────────────────
+    [ObservableProperty] private ISeries[] _pickupSeries = Array.Empty<ISeries>();
+    [ObservableProperty] private Axis[] _pickupXAxes = Array.Empty<Axis>();
+    [ObservableProperty] private Axis[] _pickupYAxes = Array.Empty<Axis>();
 
     // ── Productivity ring chart ───────────────────────────────────────────────
     [ObservableProperty] private ISeries[] _ringSeries = Array.Empty<ISeries>();
@@ -208,7 +222,6 @@ public partial class DashboardPageViewModel : ObservableObject
         {
             var db = new AppDatabase();
 
-            // Summary cards
             var (prod, dist) = await db.GetTodayTimeAsync();
             var pickups = await db.GetTodayPickupsAsync();
 
@@ -217,14 +230,16 @@ public partial class DashboardPageViewModel : ObservableObject
             TodayPickups          = pickups;
             ProductivityScore     = (prod + dist) == 0 ? 0 : (int)(prod * 100.0 / (prod + dist));
 
-            // Weekly chart
-            var weekly = await db.GetWeeklyTimeAsync();
-            BuildWeeklyChart(weekly);
+            var haloJson = await db.GetStateAsync("HaloZones") ?? "[]";
+            var haloZones = System.Text.Json.JsonSerializer.Deserialize<List<HaloZoneItem>>(haloJson) ?? [];
+            ActiveHaloZones = haloZones.Count(z => z.Enabled);
 
-            // Ring chart
+            BuildWeeklyChart(await db.GetWeeklyActivityAsync());
+            BuildHourlyActivityChart(await db.GetTodayHourlyActivityAsync());
+            BuildNotificationChart(await db.GetTodayPickupFrequencyAsync());
+            BuildPickupChart(await db.GetFirstLookTriggersAsync());
             BuildRingChart(prod, dist);
 
-            // Top apps
             var topApps = await db.GetTopAppsTodayAsync(10);
             Application.Current?.Dispatcher.Invoke(() =>
             {
@@ -236,7 +251,7 @@ public partial class DashboardPageViewModel : ObservableObject
         catch { /* DB not yet initialized or service not running */ }
     }
 
-    private void BuildWeeklyChart(List<(string Date, int ProductiveSecs, int DistractingSecs)> weekly)
+    private void BuildWeeklyChart(List<(string Date, int ProductiveSecs, int DistractingSecs, int NeutralSecs)> weekly)
     {
         var last7 = Enumerable.Range(0, 7)
             .Select(i => DateTime.Today.AddDays(-6 + i))
@@ -244,6 +259,7 @@ public partial class DashboardPageViewModel : ObservableObject
 
         var prodValues  = new double[7];
         var distValues  = new double[7];
+        var neutValues  = new double[7];
         var labels      = new string[7];
 
         for (int i = 0; i < 7; i++)
@@ -255,6 +271,7 @@ public partial class DashboardPageViewModel : ObservableObject
             {
                 prodValues[i] = Math.Round(match.ProductiveSecs  / 3600.0, 2);
                 distValues[i] = Math.Round(match.DistractingSecs / 3600.0, 2);
+                neutValues[i] = Math.Round(match.NeutralSecs     / 3600.0, 2);
             }
         }
 
@@ -262,47 +279,159 @@ public partial class DashboardPageViewModel : ObservableObject
         {
             WeeklySeries = new ISeries[]
             {
-                new StackedColumnSeries<double>
-                {
-                    Name   = "Productive",
-                    Values = prodValues,
-                    Fill   = new SolidColorPaint(new SKColor(0x4C, 0xAF, 0x50)),
-                    Stroke = null,
-                    MaxBarWidth = 40,
-                },
-                new StackedColumnSeries<double>
-                {
-                    Name   = "Distracting",
-                    Values = distValues,
-                    Fill   = new SolidColorPaint(new SKColor(0xF4, 0x43, 0x36)),
-                    Stroke = null,
-                    MaxBarWidth = 40,
-                },
+                MakeStackedColumn("Productive",  prodValues, 0x4C, 0xAF, 0x50),
+                MakeStackedColumn("Distracting", distValues, 0xF4, 0x43, 0x36),
+                MakeStackedColumn("Neutral",     neutValues, 0x9E, 0x9E, 0x9E),
             };
+            WeeklyXAxes = MakeCategoryXAxes(labels);
+            WeeklyYAxes = MakeHourYAxes();
+        });
+    }
 
-            WeeklyXAxes = new[]
+    private void BuildHourlyActivityChart(List<(int Hour, int ProductiveSecs, int DistractingSecs, int NeutralSecs)> hourly)
+    {
+        var prod = new double[24];
+        var dist = new double[24];
+        var neut = new double[24];
+        var labels = new string[24];
+
+        for (int h = 0; h < 24; h++)
+        {
+            labels[h] = h % 3 == 0 ? $"{h:D2}" : "";
+            var match = hourly.FirstOrDefault(x => x.Hour == h);
+            if (match != default)
+            {
+                prod[h] = Math.Round(match.ProductiveSecs  / 60.0, 1);
+                dist[h] = Math.Round(match.DistractingSecs / 60.0, 1);
+                neut[h] = Math.Round(match.NeutralSecs     / 60.0, 1);
+            }
+        }
+
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            HourlyActivitySeries = new ISeries[]
+            {
+                MakeStackedColumn("Productive",  prod, 0x4C, 0xAF, 0x50),
+                MakeStackedColumn("Distracting", dist, 0xF4, 0x43, 0x36),
+                MakeStackedColumn("Neutral",     neut, 0x9E, 0x9E, 0x9E),
+            };
+            HourlyActivityXAxes = MakeCategoryXAxes(labels);
+            HourlyActivityYAxes = new[]
             {
                 new Axis
                 {
-                    Labels = labels,
                     LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
-                    TextSize = 11,
-                    SeparatorsPaint = null,
-                }
-            };
-
-            WeeklyYAxes = new[]
-            {
-                new Axis
-                {
-                    LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
-                    TextSize = 11,
+                    TextSize = 10,
                     SeparatorsPaint = new SolidColorPaint(new SKColor(0x33, 0x33, 0x33)),
-                    Labeler = v => $"{v:0.#}h",
+                    Labeler = v => $"{v:0.#}m",
                 }
             };
         });
     }
+
+    private void BuildNotificationChart(List<(int Hour, int Count)> frequency)
+    {
+        var values = new double[24];
+        var labels = new string[24];
+        for (int h = 0; h < 24; h++)
+        {
+            labels[h] = h % 3 == 0 ? $"{h:D2}" : "";
+            values[h] = frequency.FirstOrDefault(x => x.Hour == h).Count;
+        }
+
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            NotificationSeries = new ISeries[]
+            {
+                new ColumnSeries<double>
+                {
+                    Name = "Context switches",
+                    Values = values,
+                    Fill = new SolidColorPaint(new SKColor(0xFF, 0x98, 0x00)),
+                    Stroke = null,
+                    MaxBarWidth = 18,
+                }
+            };
+            NotificationXAxes = MakeCategoryXAxes(labels);
+            NotificationYAxes = new[]
+            {
+                new Axis
+                {
+                    LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
+                    TextSize = 10,
+                    SeparatorsPaint = new SolidColorPaint(new SKColor(0x33, 0x33, 0x33)),
+                    MinLimit = 0,
+                }
+            };
+        });
+    }
+
+    private void BuildPickupChart(List<(string ToApp, int Count)> triggers)
+    {
+        var labels = triggers.Select(t => TruncateApp(t.ToApp, 14)).ToArray();
+        var values = triggers.Select(t => (double)t.Count).ToArray();
+
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            PickupSeries = new ISeries[]
+            {
+                new ColumnSeries<double>
+                {
+                    Name = "First-look triggers",
+                    Values = values,
+                    Fill = new SolidColorPaint(new SKColor(0x7E, 0x57, 0xC2)),
+                    Stroke = null,
+                    MaxBarWidth = 36,
+                }
+            };
+            PickupXAxes = MakeCategoryXAxes(labels);
+            PickupYAxes = new[]
+            {
+                new Axis
+                {
+                    LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
+                    TextSize = 10,
+                    SeparatorsPaint = new SolidColorPaint(new SKColor(0x33, 0x33, 0x33)),
+                    MinLimit = 0,
+                }
+            };
+        });
+    }
+
+    private static StackedColumnSeries<double> MakeStackedColumn(string name, double[] values, byte r, byte g, byte b) =>
+        new()
+        {
+            Name = name,
+            Values = values,
+            Fill = new SolidColorPaint(new SKColor(r, g, b)),
+            Stroke = null,
+            MaxBarWidth = 40,
+        };
+
+    private static Axis[] MakeCategoryXAxes(string[] labels) => new[]
+    {
+        new Axis
+        {
+            Labels = labels,
+            LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
+            TextSize = 10,
+            SeparatorsPaint = null,
+        }
+    };
+
+    private static Axis[] MakeHourYAxes() => new[]
+    {
+        new Axis
+        {
+            LabelsPaint = new SolidColorPaint(new SKColor(0xCC, 0xCC, 0xCC)),
+            TextSize = 11,
+            SeparatorsPaint = new SolidColorPaint(new SKColor(0x33, 0x33, 0x33)),
+            Labeler = v => $"{v:0.#}h",
+        }
+    };
+
+    private static string TruncateApp(string app, int max) =>
+        app.Length <= max ? app : app[..(max - 1)] + "…";
 
     private void BuildRingChart(int prodSecs, int distSecs)
     {
@@ -342,6 +471,15 @@ public partial class DashboardPageViewModel : ObservableObject
 }
 
 public record TopAppRow(string AppName, string TimeDisplay);
+
+public class HaloZoneItem
+{
+    public string Name { get; set; } = "";
+    public string BluetoothAddress { get; set; } = "";
+    public int RadiusMeters { get; set; } = 5;
+    public string BlockCategory { get; set; } = "distracting";
+    public bool Enabled { get; set; } = true;
+}
 
 public record NuclearModeOption(string Value, string DisplayName, string Description, string Icon);
 
@@ -665,6 +803,11 @@ public partial class SettingsPageViewModel : ObservableObject
     [ObservableProperty] private bool   _aiEnabled            = false;
     [ObservableProperty] private string _status               = "";
 
+    public ObservableCollection<HaloZoneItem> HaloZones { get; } = [];
+    [ObservableProperty] private string _newHaloName = "";
+    [ObservableProperty] private string _newHaloAddress = "";
+    [ObservableProperty] private int _newHaloRadius = 5;
+
     public SettingsPageViewModel() => _ = LoadAsync();
 
     private async Task LoadAsync()
@@ -675,9 +818,41 @@ public partial class SettingsPageViewModel : ObservableObject
             AiEnabled            = (await _db.GetStateAsync("AIEnabled"))       == "1";
             var fStr             = await _db.GetStateAsync("FrictionSeconds");
             if (int.TryParse(fStr, out int fs)) FrictionDelaySeconds = fs;
+
+            var haloJson = await _db.GetStateAsync("HaloZones") ?? "[]";
+            var zones = System.Text.Json.JsonSerializer.Deserialize<List<HaloZoneItem>>(haloJson) ?? [];
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                HaloZones.Clear();
+                foreach (var z in zones) HaloZones.Add(z);
+            });
         }
         catch { /* DB not ready */ }
     }
+
+    [RelayCommand]
+    private void AddHaloZone()
+    {
+        if (string.IsNullOrWhiteSpace(NewHaloName) || string.IsNullOrWhiteSpace(NewHaloAddress))
+        {
+            Status = "Halo zone requires a name and Bluetooth address.";
+            return;
+        }
+        HaloZones.Add(new HaloZoneItem
+        {
+            Name = NewHaloName.Trim(),
+            BluetoothAddress = NewHaloAddress.Trim().ToUpperInvariant(),
+            RadiusMeters = NewHaloRadius,
+            BlockCategory = "distracting",
+            Enabled = true
+        });
+        NewHaloName = "";
+        NewHaloAddress = "";
+        Status = "Zone added — save to apply.";
+    }
+
+    [RelayCommand]
+    private void RemoveHaloZone(HaloZoneItem zone) => HaloZones.Remove(zone);
 
     [RelayCommand]
     private async Task SaveAsync()
@@ -689,6 +864,11 @@ public partial class SettingsPageViewModel : ObservableObject
             new { key = "FrictionSeconds", value = FrictionDelaySeconds.ToString() }));
         await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
             new { key = "AIEnabled", value = AiEnabled ? "1" : "0" }));
+
+        var haloJson = System.Text.Json.JsonSerializer.Serialize(HaloZones.ToList());
+        await App.Pipe.FireAndForgetAsync(PipeMessage.Create(MessageType.SetState,
+            new { key = "HaloZones", value = haloJson }));
+
         Status = "Saved. Changes take effect on next app launch.";
     }
 }

@@ -102,6 +102,112 @@ public sealed class AppDatabase
         return list;
     }
 
+    /// <summary>Hourly app activity from ScreenTimeLog (Screen Time: App &amp; Website Activity).</summary>
+    public async Task<List<(int Hour, int ProductiveSecs, int DistractingSecs, int NeutralSecs)>> GetTodayHourlyActivityAsync()
+    {
+        await using var conn = new SqliteConnection(ConnStr);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT CAST(strftime('%H', Timestamp, 'localtime') AS INTEGER) AS Hr,
+                   Category, COALESCE(SUM(DurationSeconds), 0)
+            FROM ScreenTimeLog
+            WHERE Date(Timestamp) = Date('now', 'localtime')
+            GROUP BY Hr, Category
+            ORDER BY Hr";
+        var buckets = Enumerable.Range(0, 24)
+            .ToDictionary(h => h, _ => (Prod: 0, Dist: 0, Neut: 0));
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+        {
+            int hr = r.GetInt32(0);
+            var cat = r.GetString(1);
+            int secs = r.GetInt32(2);
+            if (!buckets.ContainsKey(hr)) continue;
+            var curr = buckets[hr];
+            buckets[hr] = cat switch
+            {
+                "productive"  => (curr.Prod + secs, curr.Dist, curr.Neut),
+                "distracting" => (curr.Prod, curr.Dist + secs, curr.Neut),
+                _             => (curr.Prod, curr.Dist, curr.Neut + secs)
+            };
+        }
+        return buckets.Select(kvp => (kvp.Key, kvp.Value.Prod, kvp.Value.Dist, kvp.Value.Neut)).ToList();
+    }
+
+    /// <summary>Hourly context-switch frequency from PickupLog (Screen Time: Notifications proxy).</summary>
+    public async Task<List<(int Hour, int Count)>> GetTodayPickupFrequencyAsync()
+    {
+        await using var conn = new SqliteConnection(ConnStr);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT CAST(strftime('%H', Timestamp, 'localtime') AS INTEGER) AS Hr,
+                   COUNT(*) AS Cnt
+            FROM PickupLog
+            WHERE Date(Timestamp) = Date('now', 'localtime')
+            GROUP BY Hr
+            ORDER BY Hr";
+        var buckets = Enumerable.Range(0, 24).ToDictionary(h => h, _ => 0);
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+            buckets[r.GetInt32(0)] = r.GetInt32(1);
+        return buckets.Select(kvp => (kvp.Key, kvp.Value)).ToList();
+    }
+
+    /// <summary>First-look triggers: distracting apps opened after productive/neutral context (Screen Time: Pickups).</summary>
+    public async Task<List<(string ToApp, int Count)>> GetFirstLookTriggersAsync(int days = 7)
+    {
+        await using var conn = new SqliteConnection(ConnStr);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT ToApp, COUNT(*) AS Cnt
+            FROM PickupLog
+            WHERE Timestamp >= datetime('now', @days, 'localtime')
+              AND ToApp IS NOT NULL
+            GROUP BY ToApp
+            ORDER BY Cnt DESC
+            LIMIT 12";
+        cmd.Parameters.AddWithValue("@days", $"-{days} days");
+        var list = new List<(string, int)>();
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+            list.Add((r.GetString(0), r.GetInt32(1)));
+        return list;
+    }
+
+    /// <summary>Weekly stacked activity by category from ScreenTimeLog.</summary>
+    public async Task<List<(string Date, int ProductiveSecs, int DistractingSecs, int NeutralSecs)>> GetWeeklyActivityAsync()
+    {
+        await using var conn = new SqliteConnection(ConnStr);
+        await conn.OpenAsync();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT Date(Timestamp, 'localtime') AS Dt, Category, SUM(DurationSeconds)
+            FROM ScreenTimeLog
+            WHERE Timestamp >= datetime('now', '-7 days', 'localtime')
+            GROUP BY Dt, Category
+            ORDER BY Dt ASC";
+        var dict = new Dictionary<string, (int Prod, int Dist, int Neut)>();
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+        {
+            var dt = r.GetString(0);
+            var cat = r.GetString(1);
+            var secs = r.GetInt32(2);
+            if (!dict.ContainsKey(dt)) dict[dt] = (0, 0, 0);
+            var curr = dict[dt];
+            dict[dt] = cat switch
+            {
+                "productive"  => (curr.Prod + secs, curr.Dist, curr.Neut),
+                "distracting" => (curr.Prod, curr.Dist + secs, curr.Neut),
+                _             => (curr.Prod, curr.Dist, curr.Neut + secs)
+            };
+        }
+        return dict.Select(kvp => (kvp.Key, kvp.Value.Prod, kvp.Value.Dist, kvp.Value.Neut)).ToList();
+    }
+
     // ── System state ──────────────────────────────────────────────────────────
 
     public async Task<string?> GetStateAsync(string key)
