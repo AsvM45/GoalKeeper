@@ -2,10 +2,10 @@
 
 > Apple Screen Time + ScreenZen + StayFocusd, merged into one tamper-proof Windows app.
 
-[![Build and Release](https://github.com/yourusername/GoalKeeper/actions/workflows/build-and-release.yml/badge.svg)](https://github.com/yourusername/GoalKeeper/actions)
-[![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen)](GoalKeeper/ServiceEngine.Tests)
+[![Build and Release](https://github.com/AsvM45/GoalKeeper/actions/workflows/build-and-release.yml/badge.svg)](https://github.com/AsvM45/GoalKeeper/actions)
+[![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen)](ServiceEngine.Tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-informational)](https://github.com/yourusername/GoalKeeper)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-informational)](https://github.com/AsvM45/GoalKeeper)
 [![.NET](https://img.shields.io/badge/.NET-8.0-purple)](https://dotnet.microsoft.com/download/dotnet/8.0)
 
 ---
@@ -124,7 +124,7 @@ If you accidentally block a critical process, here's how to recover:
 
 ```powershell
 # 1. Clone the repo
-git clone https://github.com/yourusername/GoalKeeper.git
+git clone https://github.com/AsvM45/GoalKeeper.git
 cd GoalKeeper
 
 # 2. Safety first
